@@ -1,3 +1,85 @@
+# MAV-LUA development guide
+
+## Working agreement
+
+- Keep README.md user-facing: features, installation, controls and previews. Put implementation details here.
+- Keep the independent MAV name. Text uses native bitmap glyphs and integer coordinates. Grey belongs only to the navball ground; no antialiasing or per-letter scaling in previews.
+- Commit a working radio state when the user approves it. v0.1.1 is explicitly authorized now. The new Parameters work must remain uncommitted until the user confirms it on hardware.
+- Never rewrite an existing release tag. Every new tag ships source AND compiled packages for both pre-edgetx-2.11rc1 and post-edgetx-2.11rc1. RC1 itself belongs to post.
+- Preserve required LICENSE/SPDX notices and the desktop font notices. There is no attribution section in the user README.
+- Use one telemetry queue consumer. A parameter module receives packets from that consumer; it must not pop the shared queue itself.
+- Parameter downloads are opt-in. Do not write a value on scroll or while editing. Require an explicit save action and matching autopilot readback before reporting success. No automatic parameter download on load/page switch.
+- Do not equate a CRSF device parameter with an autopilot parameter. Stock ELRS 4.1 converts telemetry but does not expose a raw parameter stream to handset Lua. Any bridge requirement must be documented and shown honestly in the UI.
+
+## Current hardware and versions
+
+The user confirmed the r4 fixes for release and source Lua on a TBS Alpha running EdgeTX 2.11. Earlier Tango 2 testing used FreedomTX 1.4.0. The Alpha is connected to a Zorro internal ELRS 4.1 module via the full-duplex external-bay serial connection. New Lua 5.3 compiled artifacts are host-validated until specifically radio-confirmed. A 15-minute hardware soak has not been reported.
+
+EdgeTX 2.11 RC1 changes from Lua 5.2 to 5.3. The new ABI uses int32 and float32: assembling a uint32 can overflow integers or discard low bits as float. Decode disjoint packed byte fields directly. Source syntax must remain compatible with Lua 5.2 unless a lazily loaded modern-only module explicitly checks support.
+
+The legacy binary format has number/string tags 5/6 and size32/double64. The modern format has standard tags, size32/int32/float32. Compiler bootstrap downloads have pinned SHA-256 checks. Long string sizes must also be 32-bit, not just the header field. The independent readers in tools/lua52.py and tools/lua53.py validate nested prototypes.
+
+## Build, test and release
+
+Windows commands (omit .exe on Linux):
+
+```powershell
+python tools/build.py --bootstrap --toolchain-only
+python tools/build53.py
+python tools/firmware_test.py
+.build/lua.exe tests/test_mav.lua
+.build/lua53.exe tests/test_mav.lua
+.build/lua.exe tests/test_widget.lua
+python tools/build.py --luac .build/luac.exe --luac-post .build/luac53.exe --version v0.1.1
+.build/lua.exe tests/test_package.lua
+.build/lua53.exe tests/test_package.lua .build/MAV-post.lua
+.build/lua-freedomtx140.exe tests/test_freedomtx140.lua .build/MAV.lua
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+Use --archive to bootstrap from an existing pinned Lua tarball. Development packages use --version dev. Source packages for the two families intentionally contain the same portable source. Compiled packages contain both discovery .lua and cache .luac names, plus corresponding source under SOURCE/. Never install source over an old binary cache without removing that cache.
+
+For a release, finish tests, regenerate previews, copy the release assets/checksums under releases/<tag>/, commit, create an annotated tag with the changelog in its message, and push commit/tag atomically. Publish the four ZIPs and SHA256SUMS.txt. The tag-triggered GitHub workflow also builds and attaches these assets for future tags. Keep parameters under development out of the confirmed v0.1.1 tag.
+
+Tests include source and compiled ABI checks, bounded history, malformed packets, geometry, real C cursor behavior under the legacy tail-call defect, grey-only instrument pixels, sustained traffic, and the 10,000-instruction callback budget. The desktop runner is not a full firmware emulator. Lua mock internals are excluded in the dedicated Tango instruction counter because firmware APIs are C functions.
+
+tools/preview.py uses original FreedomTX STD or SQT5 bitmap sheets. Font assets are desktop-only. Exported images go to ignored dist/previews; reviewed README images are copied to docs/images. Avoid treating generated desktop previews as hardware screenshots.
+
+## Telemetry implementation
+
+
+Standard CRSF frames become firmware sensors; custom status frames reach Lua. This is a **MAVLink-over-CRSF viewer**, not a direct serial MAVLink endpoint. The validated status path is the one established by the [reference status-messages branch](https://github.com/FractalEngineer/OpenTX-Telemetry-Widget/tree/status-messages) and described in [ExpressLRS's MAVLink documentation](https://www.expresslrs.org/software/mavlink/).
+
+| Display | Sensor | Expected units |
+| --- | --- | --- |
+| Navball / heading | `Ptch`, `Roll`, `Yaw` | Radians; ArduPilot/ELRS positive pitch means nose up |
+| Battery / current | `RxBt` or `BtRx`, `Curr` | Volts / amps |
+| Satellites / link | `Sats`, `RQly` | Count / percent |
+| Flight mode | `FM`, or custom `0x5001` + `0x5007` | Transmitted text preferred; fallback decodes ArduPilot Plane/VTOL, Copter and Rover/Boat modes |
+| Arm state | Custom `0x5001` | Explicit armed bit; not inferred from mode text |
+| Home distance / dial | Custom `0x5004` | Metres; dial marks the aircraft's bearing FROM home |
+| Ground speed | `GSpd` | km/h by default; knots, mph, m/s and ft/s labels follow sensor metadata |
+| Altitude | `GAlt`, falling back to `Alt` | Metres or feet, following sensor metadata |
+
+Keep stock attitude, voltage and current units. Renamed sensors require updating the compact `names` list in the source and rebuilding. Reload the model after changing sensor assignments. Missing names are retried once per second; existing IDs are cached.
+
+- `FM` is displayed as sent. In the referenced ELRS/ArduPilot convention, a trailing `*` means disarmed. Absence of `*` is not independently treated as proof of arming.
+- Missing `FM` uses the passthrough mode and vehicle type. Unknown types/modes remain numeric (`M5`, for example), rather than guessing an aircraft family. These packed mode IDs are ArduPilot-specific.
+- The top-right status is `ARMD` for confirmed armed, `!RDY` after a recent `PreArm:` message, or `RDY` after the exact message `Ready to arm`. Disarmed without an explicit readiness report is `RDY?`; missing/stale arm telemetry is `ARM?`. This transport has no pre-arm readiness bit. Readiness text expires after ten seconds and is cleared on arm/disarm transitions.
+- N/S/E/W stay north-up. The dial's chevron locates the aircraft relative to home; it is independent of yaw. `HDG` remains the aircraft's heading. The home distance is repeated in `HOM` and over the instrument (`k` means kilometres). ELRS derives these values from the autopilot's home position, so no Lua capture-at-arm is needed. This follows home changes made by the autopilot and works when the script starts after arming.
+- Home and AP status expire three seconds after their last custom frame and clear on link loss. Zero home distance is ambiguous before ELRS receives `HOME_POSITION`, so it displays `--m`; the direction marker is hidden below two metres. Home validity and update rate still need confirmation on the user's link.
+- Satellite count is not a GPS-fix or home-position indicator. Neither is invented from satellite count.
+- `GAlt` is relative altitude in the referenced ELRS MAVLink conversion. Other senders may supply GPS altitude above sea level. The screen does not invent or subtract a home altitude.
+- Global link loss blanks readings and crosses out the attitude instrument. Newer firmware's `getSourceValue()` also suppresses individually stale sensors. FreedomTX/older APIs cannot distinguish an individually stale cached value while the overall link remains active; a stationary value is not treated as evidence of freshness.
+- Missing attitude is crossed out, never displayed as level. Zero is a valid pitch, roll, speed or altitude reading.
+- Status is capped at 50 received bytes. The conversion does not carry MAVLink 2 chunk IDs; longer messages cannot be reconstructed here. Control/non-ASCII bytes become spaces.
+- No parameter requests/writes, command transmission, alarms, speech, configuration menus, logging, maps, or background module-loading graph is included in v1. The received `0x5007` vehicle-type report is telemetry, not a parameter browser.
+
+See [the protocol notes](docs/PROTOCOL.md) for the source and API contracts.
+
+
+## Protocol and historical failure analysis
+
 # Transport and firmware notes
 
 ## Why sensors and a custom-frame reader

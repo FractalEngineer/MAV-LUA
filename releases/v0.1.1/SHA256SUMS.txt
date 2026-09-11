@@ -1,0 +1,4 @@
+1dc4d0a0a955bb6ada16297d7647475b3b2d54353eb7cc29ce6513f8302f8b6b  MAV-LUA-v0.1.1-pre-edgetx-2.11rc1-source.zip
+85659a9f60c812a61c274718c1e0b6c9c2a99e653d019dcbe8acfb038dbd2803  MAV-LUA-v0.1.1-post-edgetx-2.11rc1-source.zip
+b883c2eddf4814a8fcdbedafacf3c53060a0342abcbb29f3071c2b07ebb5bef5  MAV-LUA-v0.1.1-pre-edgetx-2.11rc1-compiled.zip
+69b3e532ab048492f7f91079bae59d3bd1763b3c84f3265d10f7d2796a4af1ff  MAV-LUA-v0.1.1-post-edgetx-2.11rc1-compiled.zip

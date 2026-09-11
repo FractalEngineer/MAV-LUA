@@ -1,0 +1,41 @@
+name: Release packages
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install Pillow
+      - name: Build compilers
+        run: |
+          python tools/build.py --bootstrap --toolchain-only
+          python tools/build53.py
+          python tools/firmware_test.py
+      - name: Test and package both Lua families
+        run: |
+          .build/lua tests/test_mav.lua
+          .build/lua53 tests/test_mav.lua
+          .build/lua tests/test_widget.lua
+          python tools/build.py --luac .build/luac --luac-post .build/luac53 --version "$GITHUB_REF_NAME"
+          .build/lua tests/test_package.lua
+          .build/lua53 tests/test_package.lua .build/MAV-post.lua
+          .build/lua-freedomtx140 tests/test_freedomtx140.lua .build/MAV.lua
+          python -m unittest discover -s tests -p 'test_*.py'
+      - name: Publish tag notes and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git for-each-ref --format='%(contents)' "refs/tags/$GITHUB_REF_NAME" > .build/tag-notes.txt
+          if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "MAV-LUA $GITHUB_REF_NAME" --notes-file .build/tag-notes.txt
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/MAV-LUA-"$GITHUB_REF_NAME"-*.zip dist/SHA256SUMS.txt --clobber

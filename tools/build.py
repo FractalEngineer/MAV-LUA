@@ -1,6 +1,7 @@
 """Build a source package and optional stripped Lua 5.2 Tango candidate."""
 import argparse
 import hashlib
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ import urllib.request
 import zipfile
 
 from lua52 import validate
+from lua53 import validate as validate53
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / ".build"
@@ -63,52 +65,64 @@ def bootstrap(archive=None):
     print("Built Lua 5.2.4 host test runner and firmware-format compiler.")
 
 
-def package(compiler=None):
+def package(compiler=None, compiler53=None, version="dev"):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", version):
+        raise SystemExit("Invalid package version")
     BUILD.mkdir(exist_ok=True)
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
     files = sorted((ROOT / "src").rglob("*.lua"))
     outputs = []
-    for binary in ([False, True] if compiler else [False]):
-        name = "MAV-LUA-tango2-freedomtx-r2.zip" if binary else "MAV-LUA-source.zip"
+    targets = [("pre", None), ("post", None)]
+    if compiler:
+        targets.append(("pre", compiler))
+    if compiler53:
+        targets.append(("post", compiler53))
+    for family, target_compiler in targets:
+        binary = target_compiler is not None
+        kind = "compiled" if binary else "source"
+        name = f"MAV-LUA-{version}-{family}-edgetx-2.11rc1-{kind}.zip"
         output = dist / name
         staging = output.with_suffix(".zip.tmp")
         with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path in files:
                 rel = path.relative_to(ROOT / "src").as_posix()
                 if binary:
-                    # Tango only needs the one permanent telemetry script.
-                    if rel.startswith("WIDGETS/"):
-                        continue
-                    compiled = BUILD / "MAV.lua"
-                    subprocess.run([str(compiler), "-s", "-o", str(compiled), str(path)], check=True)
+                    compiled = BUILD / family / rel
+                    compiled.parent.mkdir(parents=True, exist_ok=True)
+                    subprocess.run([str(target_compiler), "-s", "-o", str(compiled), str(path)], check=True)
                     data = compiled.read_bytes()
                     try:
-                        stats = validate(data)
+                        stats = (validate if family == "pre" else validate53)(data)
                     except ValueError as error:
                         raise SystemExit(f"Compiler produced incompatible bytecode: {error}") from error
-                    print(f"{rel}: {len(data)} stripped bytes; {stats['functions']} functions; firmware tags verified")
+                    print(f"{family}/{rel}: {len(data)} stripped bytes; {stats['functions']} functions; ABI verified")
+                    if rel == "SCRIPTS/TELEMETRY/MAV.lua":
+                        (BUILD / ("MAV.lua" if family == "pre" else "MAV-post.lua")).write_bytes(data)
                 else:
                     data = path.read_bytes()
                 info = zipfile.ZipInfo(rel, date_time=(2026, 1, 1, 0, 0, 0))
                 info.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(info, data)
                 if binary:
-                    # FreedomTX prefers a same-name .luac cache when present.
+                    # Firmware may prefer a same-name .luac cache when present.
                     # Replace both names so an older cache cannot shadow a fix.
                     info = zipfile.ZipInfo(str(Path(rel).with_suffix(".luac")).replace("\\", "/"),
                                            date_time=(2026, 1, 1, 0, 0, 0))
                     info.compress_type = zipfile.ZIP_DEFLATED
                     archive.writestr(info, data)
-            for doc in ("README.md", "docs/HARDWARE-TEST.md", "docs/PROTOCOL.md", "LICENSE"):
+            for doc in ("README.md", "CHANGELOG.md", "LICENSE", "docs/images/navigation.png", "docs/images/messages.png"):
                 info = zipfile.ZipInfo(doc, date_time=(2026, 1, 1, 0, 0, 0))
                 info.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(info, (ROOT / doc).read_bytes())
+            info = zipfile.ZipInfo("VERSION.txt", date_time=(2026, 1, 1, 0, 0, 0))
+            archive.writestr(info, f"{version}\n{family}-edgetx-2.11rc1\n{kind}\n")
             if binary:
-                # Ship corresponding readable source with binary distributions.
-                info = zipfile.ZipInfo("SOURCE/MAV.lua", date_time=(2026, 1, 1, 0, 0, 0))
-                info.compress_type = zipfile.ZIP_DEFLATED
-                archive.writestr(info, (ROOT / "src/SCRIPTS/TELEMETRY/MAV.lua").read_bytes())
+                for path in files:
+                    rel = path.relative_to(ROOT / "src").as_posix()
+                    info = zipfile.ZipInfo("SOURCE/" + rel, date_time=(2026, 1, 1, 0, 0, 0))
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    archive.writestr(info, path.read_bytes())
         staging.replace(output)
         outputs.append(output)
     (dist / "SHA256SUMS.txt").write_text("".join(
@@ -121,9 +135,11 @@ if __name__ == "__main__":
     parser.add_argument("--bootstrap", action="store_true", help="Download/check Lua sources and build with gcc")
     parser.add_argument("--archive", type=Path, help="Use an already downloaded Lua 5.2.4 tarball")
     parser.add_argument("--luac", type=Path, help="Compile Tango candidate using a firmware-compatible Lua 5.2 compiler")
+    parser.add_argument("--luac-post", type=Path, help="EdgeTX int32/float32 Lua 5.3 compiler")
+    parser.add_argument("--version", default="dev", help="Release tag or dev; included in all artifact names")
     parser.add_argument("--toolchain-only", action="store_true")
     args = parser.parse_args()
     if args.bootstrap:
         bootstrap(args.archive)
     if not args.toolchain_only:
-        package(args.luac)
+        package(args.luac, args.luac_post, args.version)

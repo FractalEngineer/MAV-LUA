@@ -19,7 +19,7 @@ end
 local function fixture(w, h, modern)
   local f = {now = 0, rssi = 0, queue = {}, reads = 0, calls = {}, sensors = {}, probes = 0}
   local env = {LCD_W = w or 128, LCD_H = h or 96, SOLID = 0, INVERS = 1,
-    math = math, string = string, type = type}
+    math = math, string = string, type = type, FORCE = 2}
   -- Deliberately omit table, bit32, CENTERED, loadScript, and every optional event.
   env.EVT_ENTER_BREAK, env.EVT_EXIT_BREAK = 10, 11
   env.EVT_VIRTUAL_NEXT, env.EVT_VIRTUAL_PREV = 12, 13
@@ -48,15 +48,35 @@ local function fixture(w, h, modern)
   env.lcd = {
     clear = function() f.calls = {} end,
     drawText = function(x, y, s, flags) record("text", x, y, s, flags) end,
-    drawLine = function(x1, y1, x2, y2) record("line", x1, y1, x2, y2) end,
+    drawLine = function(x1, y1, x2, y2, pattern, flags) record("line", x1, y1, x2, y2, flags) end,
   }
+  function f.nativeFont()
+    -- Proportional firmware cursor API, intentionally without getTextWidth.
+    local right = 0
+    f.measure = function(s)
+      local _, narrow = s:gsub("[ ilI%.:,!'r]", "")
+      return #s * 6 - narrow * 3
+    end
+    env.lcd.drawText = function(x, y, s, flags)
+      right = x + f.measure(s)
+      if y <= env.LCD_H then record("text", x, y, s, flags) else
+        assert(x == 0 and y == env.LCD_H + 1 and flags == 0, "font probe must be below physical LCD")
+      end
+    end
+    env.lcd.getLastRightPos = function() return right end
+    env.GREY = function(n) return n * 65536 end
+    env.type = function(value)
+      if value == env.GREY then return "lightfunction" end
+      return type(value)
+    end
+  end
   if env.LCD_W >= 320 then
     env.CUSTOM_COLOR, env.WHITE, env.BLACK = 256, 65535, 0
     env.lcd.RGB = function() return 0 end
     env.lcd.setColor = function() end
     env.lcd.getTextWidth = function(_, text) return #text * 16 end
     env.lcd.drawFilledRectangle = function(x, y, width, height)
-      f.calls = {}
+      if width > 100 then f.calls = {} end
       record("fill", x, y, width, height)
     end
   end
@@ -83,6 +103,13 @@ local function fixture(w, h, modern)
     local payload = {0xF1, severity or 6}
     for i = 1, #text do payload[#payload + 1] = string.byte(text, i) end
     f.queue[#f.queue + 1] = {command or 0x80, payload}
+  end
+  function f.data(id, v, more)
+    local p = more or {0xF0}
+    p[#p + 1], p[#p + 2] = id % 256, math.floor(id / 256)
+    for i = 1, 4 do local byte = v % 256 p[#p + 1] = byte v = (v - byte) / 256 end
+    if not more then f.queue[#f.queue + 1] = {0x80, p} end
+    return p
   end
   return f
 end
@@ -148,7 +175,7 @@ f.queue = {}
 for i = 1, 30 do f.push("Message " .. i) end
 f.reads = 0
 f.app.background()
-check(f.reads == 2 and #f.queue == 28, "full-text callback budget leaves packets queued")
+check(f.reads == 1 and #f.queue == 29, "custom callback budget leaves packets queued")
 while #f.queue > 0 do f.app.background() end
 check(f.state("count") == 20 and #f.state("history") == 20, "bounded history")
 check(f.state("history")[f.state("head")].text == "Message 30", "newest entry")
@@ -200,7 +227,7 @@ f = fixture(128, 96, true)
 telemetry(f)
 local screen = f.render()
 check(screen:find("16.4V", 1, true) and screen:find("STAB*", 1, true), "battery and unmodified mode")
-check(screen:find("SAT 14", 1, true) and screen:find("HDG 303", 1, true), "satellites and normalized heading")
+check(screen:find("SAT\n14", 1, true) and screen:find("HDG\n303", 1, true), "satellites and normalized heading")
 f.sensors.Ptch.valid, f.sensors.RxBt.valid = false, false
 screen = f.render()
 check(screen:find("--V", 1, true), "stale sensor suppressed on modern firmware")
@@ -212,7 +239,7 @@ f.rssi = 99
 f.sensors.Ptch.valid, f.sensors.RxBt.valid = true, true
 check(f.render():find("16.4V", 1, true), "link recovery")
 f.sensors.Sats.value = 255
-check(f.render():find("SAT --", 1, true), "unknown satellite sentinel")
+check(f.render():find("SAT\n--", 1, true), "unknown satellite sentinel")
 f.sensors.Ptch.value = 0/0
 f.render()
 check(up(sample, "values")[1] == nil, "nonfinite telemetry suppressed")
@@ -239,7 +266,7 @@ local function bounds(f, zone)
   for _, c in ipairs(f.calls) do
     if c[1] == "text" then
       local cw, ch = f.env.CUSTOM_COLOR and 16 or 6, f.env.CUSTOM_COLOR and 19 or 8
-      assert(c[2] >= x0 and c[3] >= y0 and c[2] + #c[4] * cw <= x0 + w
+      assert(c[2] >= x0 and c[3] >= y0 and c[2] + (f.measure and f.measure(c[4]) or #c[4] * cw) <= x0 + w
         and c[3] + ch <= y0 + h, "text outside screen: " .. c[4])
     elseif c[1] == "line" then
       assert(c[2] >= x0 and c[2] < x0 + w and c[4] >= x0 and c[4] < x0 + w
@@ -271,6 +298,113 @@ for _, size in ipairs({{128,64}, {128,96}, {212,64}, {320,240}, {480,272}, {800,
     check(f.rows():find("MAV:", 1, true), "small widget full-screen prompt")
   end
 end
+
+-- Passthrough removes the dependency on FreedomTX's missing/renamed FM sensor.
+f = fixture()
+telemetry(f)
+f.sensors.FM = nil
+f.nativeFont()
+local p = f.data(0x5007, 16777216 + 1, {0xF2, 2}) -- plane
+f.data(0x5001, 6 + 256, p) -- FBWA, armed
+f.queue = {{0x80, p}}
+screen = f.render()
+check(screen:find("FBWA", 1, true) and screen:find("ARMD", 1, true), "F2 mode family and explicit armed bit")
+f.data(0x5004, 123 * 4 + 90 * 33554432) -- 123 m; home west => craft east
+screen = f.render()
+local ap = up(up(f.receive, "passthrough"), "ap")
+check(ap.distance == 123 and ap.bearing == 90, "home bearing reversed to craft FROM home")
+check(screen:find("HOM\n123m", 1, true), "home in data list")
+bounds(f)
+local atRight, grey, overlay, eastMarker = false, false, false, false
+for _, c in ipairs(f.calls) do
+  if c[1] == "text" and c[4] == "123m" and c[2] < 64 then overlay = true end
+  if c[1] == "text" and c[4] == "ARMD" and c[2] + f.measure(c[4]) == 128 then atRight = true end
+  if c[1] == "line" and c[6] == 8 * 65536 + 2 then grey = true end
+  if c[1] == "line" and c[2] == 55 and c[3] == 52 and c[4] == 50 then eastMarker = true end
+end
+check(atRight and overlay and grey and eastMarker, "native width, grey FORCE fill, distance overlay and east marker")
+f.sensors.Yaw.value = 1.5
+f.render()
+check(ap.bearing == 90, "home dial does not rotate with heading")
+for _, case in ipairs({{0,180}, {30,270}, {60,0}, {90,90}}) do
+  f.data(0x5004, 400 + case[1] * 33554432)
+  f.render()
+  check(ap.bearing == case[2], "cardinal FROM-home bearing " .. case[2])
+end
+f.data(0x5004, 321 * 4 + 2)
+f.render()
+check(ap.distance == 32100, "home decimal exponent")
+f.data(0x5004, 0)
+check(f.render():find("HOM\n--m", 1, true), "zero home distance is not invented home lock")
+f.data(0x5001, 6)
+check(f.render():find("RDY?", 1, true), "disarmed does not imply prearm readiness")
+f.push("PreArm: GPS", 4)
+check(f.render():find("!RDY", 1, true), "explicit prearm warning")
+check(f.calls[#f.calls][1] == "text" and f.calls[#f.calls][3] == 87
+  and f.calls[#f.calls][4] == "PreArm: GPS", "latest message occupies bottom nav line")
+f.push("Ready to arm", 6)
+check(f.render():find("RDY\n", 1, true), "explicit ready message")
+f.now = f.now + 1001
+f.data(0x5001, 6)
+check(f.render():find("RDY?", 1, true), "readiness text expires even with live AP status")
+f.data(0x5001, 262)
+f.render()
+f.data(0x5001, 6)
+check(f.render():find("RDY?", 1, true), "arm/disarm transition clears readiness")
+f.now = f.now + 301
+screen = f.render()
+check(screen:find("ARM?", 1, true) and screen:find("MODE --", 1, true), "AP status freshness expires independently of link")
+f.data(0x5007, 16777216 + 2)
+f.app.background()
+f.data(0x5001, 6)
+check(f.render():find("LOIT", 1, true), "copter mode family")
+f.data(0x5007, 16777216 + 0)
+check(f.render():find("M5", 1, true), "unknown vehicle keeps numeric mode instead of guessing plane")
+f.data(0x5001, 0)
+check(f.render():find("M31", 1, true), "five-bit mode offset wraps at mode 31")
+f.data(0x5007, 16777216 + 10)
+f.app.background()
+f.data(0x5001, 4)
+check(f.render():find("STER", 1, true), "rover steering mode family")
+local previous = ap.mode
+p = f.data(0x5001, 11, {0xF2, 2})
+f.data(0x5004, 999, p)
+p[#p] = "bad"
+f.queue = {{0x80, p}}
+f.app.background()
+check(ap.mode == previous, "malformed F2 is rejected before any tuple mutates state")
+for _, invalid in ipairs({{0xF2, 10}, {0xF2, 0}, {0xF2, 1.5}, {0xF2, 0/0}, {0xF0, 1, 80, 1, 0, 0},
+  {0xF0, 1, 80, 1, 0, 0, 256}, {0xF2, 1, 1, 80, 1, 0, 0, 0, 0}}) do
+  f.queue = {{0x80, invalid}}
+  f.app.background()
+end
+check(ap.mode == previous, "truncated, oversized and invalid-byte passthrough rejected")
+f.rssi = 0
+f.render()
+f.rssi = 99
+check(f.render():find("ARM?", 1, true) and ap.vehicle == nil, "reconnect requires fresh state and vehicle type")
+
+-- Real font measurement uses the full width and shrinks previews only when safe.
+f = fixture()
+f.nativeFont()
+f.push(string.rep("iW", 25))
+f.render(10)
+local preview, previewLines, maxRight = "", 0, 0
+for _, c in ipairs(f.calls) do
+  if c[1] == "text" and c[4]:match("^[iW]+$") then
+    preview, previewLines = preview .. c[4], previewLines + 1
+    maxRight = math.max(maxRight, c[2] + f.measure(c[4]))
+  end
+end
+check(#preview == 50 and previewLines == 2 and maxRight >= 123, "50-byte proportional preview fills width in two lines")
+bounds(f)
+f.push(string.rep("W", 50))
+f.render()
+preview, previewLines = "", 0
+for _, c in ipairs(f.calls) do
+  if c[1] == "text" and c[4]:match("^W+$") then preview, previewLines = preview .. c[4], previewLines + 1 end
+end
+check(#preview == 50 and previewLines == 3, "wide glyphs keep three preview rows without dropping text")
 
 -- Retained heap must plateau under sustained traffic, including navigation.
 f = fixture()
@@ -327,7 +461,7 @@ debug.sethook(function() instructions = instructions + 100 end, "", 100)
 f.app.run(0)
 debug.sethook()
 print("Worst-case queued burst: ~" .. instructions .. " instructions")
-check(instructions < 9000 and #f.queue == 6, "burst plus drawing fits permanent-script instruction limit")
+check(instructions < 9000 and #f.queue == 7, "burst plus drawing fits permanent-script instruction limit")
 -- Full history and extreme instrument attitudes must also respect the budget.
 for _, size in ipairs({{128,64}, {128,96}, {212,64}, {320,240}, {480,272}, {800,480}}) do
   f = fixture(size[1], size[2])
@@ -345,4 +479,59 @@ for _, size in ipairs({{128,64}, {128,96}, {212,64}, {320,240}, {480,272}, {800,
     check(instructions < 10000, "callback budget at " .. size[1] .. "x" .. size[2] .. " page " .. page .. ": " .. instructions)
   end
 end
+-- Tango cursor-only font API + solid grey, live home, and maximum F2 packet.
+f = fixture()
+telemetry(f)
+f.sensors.FM = nil
+f.nativeFont()
+f.quiet = true
+f.data(0x5007, 16777217)
+f.app.background()
+f.data(0x5001, 262)
+f.app.background()
+f.data(0x5004, 492 + 90 * 33554432)
+f.app.background()
+for i = 1, 20 do f.push(string.rep("W", 49) .. i, 4) f.app.background() end
+local tangoMax = 0
+for _, attitude in ipairs({{0,0}, {0.5,0.7}, {-1.57,0}, {-1.57,1.57}}) do
+  f.sensors.Ptch.value, f.sensors.Roll.value = attitude[1], attitude[2]
+  for page = 1, 2 do
+    for _, kind in ipairs({"text", "multi"}) do
+      f.queue = {}
+      if kind == "text" then f.push(string.rep("W", 50), 4) else
+        local p = {0xF2, 9}
+        for i = 1, 9 do f.data(0x5004, 492 + 90 * 33554432, p) end
+        f.queue = {{0x80, p}}
+      end
+      f.now = f.now + 10
+      f.control(11)
+      if page == 2 then f.control(10) end
+      instructions = 0
+      -- Firmware APIs are C functions. Exclude Lua mock internals here so the
+      -- cursor/font simulator is not charged to the radio script's budget.
+      debug.sethook(function()
+        if debug.getinfo(2, "S").source == "@" .. source then instructions = instructions + 1 end
+      end, "", 1)
+      f.app.run(0)
+      debug.sethook()
+      tangoMax = math.max(tangoMax, instructions)
+      check(instructions < 10000, "Tango grey/cursor budget " .. page .. " " .. kind .. ": " .. instructions)
+    end
+  end
+end
+f = fixture()
+telemetry(f)
+f.nativeFont()
+f.quiet = true
+f.sensors.Ptch.value, f.sensors.Roll.value = -1.57, 0
+f.push(string.rep("W", 50), 4)
+instructions = 0
+debug.sethook(function()
+  if debug.getinfo(2, "S").source == "@" .. source then instructions = instructions + 1 end
+end, "", 1)
+f.app.run(0)
+debug.sethook()
+check(instructions < 10000, "first Tango callback with sensor discovery and grey fill: " .. instructions)
+tangoMax = math.max(tangoMax, instructions)
+print("Tango grey/cursor worst callback: ~" .. tangoMax .. " instructions")
 print(string.format("PASS: %d assertions; 25,500-cycle soak heap delta %.2f KiB", tests, after - before))

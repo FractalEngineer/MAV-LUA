@@ -46,7 +46,10 @@ def validate(data, stripped=True):
             raise ValueError("Invalid function header")
         code_bytes = count(4) * 4
         stats["max_code_bytes"] = max(stats["max_code_bytes"], code_bytes)
-        take(code_bytes)
+        for (instruction,) in struct.iter_unpack("<I", take(code_bytes)):
+            opcode, arguments = instruction & 63, (instruction >> 23) & 511
+            if opcode == 30 and arguments == 1:  # OP_TAILCALL, zero arguments
+                raise ValueError("Zero-argument tail call is unsafe on FreedomTX 1.40; assign the result before returning")
         for _ in range(count()):
             tag = take(1)[0]
             if tag == 0:  # nil

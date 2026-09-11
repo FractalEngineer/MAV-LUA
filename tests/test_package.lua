@@ -31,6 +31,17 @@ local app = assert(loadfile(path, "b"))()
 app.init()
 app.run(0)
 assert(output:find("AUTO*", 1, true) and output:find("16.4V", 1, true))
+-- Exercise the shipped custom decoder, not only native sensor text.
+sensors.FM = nil
+now = 10
+queue = {0xF2, 2, 7, 80, 1, 0, 0, 1, 1, 80, 6, 1, 0, 0}
+app.run(0)
+assert(output:find("FBWA", 1, true) and output:find("ARMD", 1, true))
+queue = {0xF0, 4, 80, 236, 1, 0, 180} -- 123 metres, home west
+app.run(0)
+assert(output:find("123m", 1, true))
+sensors.FM = "AUTO*"
+now = 20
 local function message(i)
   local text = "Warning " .. i .. string.rep("W", 35)
   queue = {0xF1, 4}
@@ -56,6 +67,7 @@ for i = 1, 5000 do
 end
 local after = heap()
 assert(after - full < 3, "stripped runtime retains growing state: " .. (after - full) .. " KiB")
+assert(maxInstructions < 10000, "stripped runtime exceeds permanent callback budget")
 print(string.format("PASS: stripped bytecode, missing libraries, both pages, history, 5,000-cycle soak"))
 print(string.format("Host 64-bit heap delta: %.2f KiB loaded/full; %.2f KiB soak growth; max ~%d instructions/run",
   full - before, after - full, maxInstructions))
