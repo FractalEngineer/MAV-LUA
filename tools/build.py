@@ -16,6 +16,16 @@ from lua53 import validate as validate53
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / ".build"
+
+
+def portable_bytes(path):
+    """Keep packaged source/docs identical across Windows and Linux checkouts."""
+    data = path.read_bytes()
+    if path.suffix.lower() in {".lua", ".md", ".txt"} or path.name == "LICENSE":
+        return data.replace(b"\r\n", b"\n")
+    return data
+
+
 LUA_SHA256 = "b9e2e4aad6789b3b63a056d442f7b39f0ecfca3ae0f1fc0ae4e9614401b69f4b"
 LUA_URL = "https://www.lua.org/ftp/lua-5.2.4.tar.gz"
 
@@ -114,8 +124,9 @@ def package(compiler=None, compiler53=None, version="dev"):
                     if rel == "SCRIPTS/TELEMETRY/MAV.lua":
                         (BUILD / ("MAV.lua" if family == "pre" else "MAV-post.lua")).write_bytes(data)
                 else:
-                    data = path.read_bytes()
+                    data = portable_bytes(path)
                 info = zipfile.ZipInfo(rel, date_time=timestamp)
+                info.create_system = 3
                 info.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(info, data)
                 if binary:
@@ -123,23 +134,27 @@ def package(compiler=None, compiler53=None, version="dev"):
                     # Replace both names so an older cache cannot shadow a fix.
                     info = zipfile.ZipInfo(str(Path(rel).with_suffix(".luac")).replace("\\", "/"),
                                            date_time=timestamp)
+                    info.create_system = 3
                     info.compress_type = zipfile.ZIP_DEFLATED
                     archive.writestr(info, data)
             docs = ["README.md", "CHANGELOG.md", "LICENSE"]
             docs += [p.relative_to(ROOT).as_posix() for p in sorted((ROOT / 'docs/images').glob('*.png'))]
             for doc in docs:
                 info = zipfile.ZipInfo(doc, date_time=timestamp)
+                info.create_system = 3
                 info.compress_type = zipfile.ZIP_DEFLATED
-                archive.writestr(info, (ROOT / doc).read_bytes())
+                archive.writestr(info, portable_bytes(ROOT / doc))
             info = zipfile.ZipInfo("VERSION.txt", date_time=timestamp)
+            info.create_system = 3
             compatibility = "Before EdgeTX 2.11 RC1" if binary else "EdgeTX 2.11 RC1 or newer"
             archive.writestr(info, f"{version}\n{kind}\n{compatibility}\nPages: Navigation, Messages, Parameters\nPAGE changes pages; ENTER selects\nParameters require EdgeTX 2.11 and the ELRS TX bridge\n")
             if binary:
                 for path in files:
                     rel = path.relative_to(ROOT / "src").as_posix()
                     info = zipfile.ZipInfo("SOURCE/" + rel, date_time=timestamp)
+                    info.create_system = 3
                     info.compress_type = zipfile.ZIP_DEFLATED
-                    archive.writestr(info, path.read_bytes())
+                    archive.writestr(info, portable_bytes(path))
         staging.replace(output)
         outputs.append(output)
     (dist / "SHA256SUMS.txt").write_text("".join(
