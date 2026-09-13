@@ -1,7 +1,7 @@
 -- Black-box smoke and heap measurement of the actual stripped radio artifact.
 local path = arg[1] or ".build/MAV.lua"
 LCD_W, LCD_H, SOLID, INVERS = 128, 96, 0, 1
-EVT_ENTER_BREAK, EVT_VIRTUAL_NEXT, EVT_EXIT_BREAK = 10, 12, 11
+EVT_PAGE_BREAK, EVT_VIRTUAL_NEXT, EVT_EXIT_BREAK = 10, 12, 11
 local now, queue, output = 0, nil, ""
 local sensors = {Ptch = 0.1, Roll = -0.3, Yaw = 2, RxBt = 16.4,
   Sats = 12, RQly = 99, FM = "AUTO*", GAlt = 100, GSpd = 35, Curr = 3}
@@ -36,7 +36,7 @@ sensors.FM = nil
 now = 10
 queue = {0xF2, 2, 7, 80, 1, 0, 0, 1, 1, 80, 6, 1, 0, 0}
 app.run(0)
-assert(output:find("FBWA", 1, true) and output:find("ARMD", 1, true))
+assert(output:find("FBWA", 1, true) and output:find("ARMED", 1, true))
 queue = {0xF0, 4, 80, 236, 1, 0, 180} -- 123 metres, home west
 app.run(0)
 assert(output:find("123m", 1, true))

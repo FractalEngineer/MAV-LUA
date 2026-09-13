@@ -1,0 +1,2 @@
+7139f2edf45447048573e151d2eddbc97e9a7cd3fa7c367f7b6bacdf9268c9ff  MAV-LUA-v0.1.2_source.zip
+755ad6cfcfbe72de52e4fb3552305ec306c65139e12aa66673b52c125dfd1d10  MAV-LUA-v0.1.2_precompiled.zip

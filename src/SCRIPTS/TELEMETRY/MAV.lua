@@ -1,11 +1,12 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- MAV-LUA: small, read-only MAVLink-over-CRSF telemetry display.
+-- MAV-LUA: small MAVLink-over-CRSF telemetry display.
 -- Firmware owns standard CRSF sensors; this script alone consumes custom frames.
--- No table/bit32 library, modules, bitmaps, or growing caches on the radio.
+-- Navigation and Messages do not load the optional parameter modules.
 
 local history, head, count, selected, unread
 local page, sensorIds, sensorUnits, discoveryAt, nextSample, values, linked
 local ap
+local params, opening, parameterError, lastVisible
 local LIMIT = 20
 local names = {"Ptch", "Roll", "Yaw", "RxBt", "Sats", "FM", "RQly", "GSpd", "GAlt", "Curr"}
 local severityNames = "EMRALRCRTERRWRNNOTINFDBG"
@@ -29,8 +30,10 @@ local function passthrough(p, now)
     if not finite(p[2]) or p[2] < 1 or p[2] > 9 or p[2] % 1 ~= 0 then return end
     first, last = 3, 2 + p[2] * 6
   end
-  if #p ~= last then return end
-  for i = first, last do
+  -- Earlier ELRS converters counted their four-byte frame wrapper as payload.
+  -- Accept that exact legacy padding as well as correctly sized frames.
+  if #p ~= last and #p ~= last + 4 then return end
+  for i = first, #p do
     local b = p[i]
     if not finite(b) or b < 0 or b > 255 or b % 1 ~= 0 then return end
   end
@@ -41,7 +44,6 @@ local function passthrough(p, now)
     local low, high = p[i + 2] + p[i + 3] * 256, p[i + 5]
     if id == 0x5001 then
       local armed = p[i + 3] % 2 == 1
-      if ap.armed ~= armed then ap.readyTime = nil end
       ap.armed, ap.mode, ap.statusTime = armed, (low % 32 - 1) % 32, now
     elseif id == 0x5007 and high == 1 then
       ap.vehicle = low + p[i + 4] * 65536
@@ -57,8 +59,24 @@ local function passthrough(p, now)
 end
 
 local function receive(command, p, now)
-  if (command ~= 0x80 and command ~= 0x7F) or type(p) ~= "table"
-    then return end
+  if type(p) ~= "table" then return end
+  -- CRSF 0xAC carries the three MAVLink SYS_STATUS sensor masks in network
+  -- byte order. Bit 28 is the authoritative pre-arm check status. Keep the
+  -- masks disjoint: EdgeTX's int32/float32 Lua cannot safely assemble uint32.
+  if command == 0xAC then
+    if #p ~= 12 then return end
+    for i = 1, #p do
+      local b = p[i]
+      if not finite(b) or b < 0 or b > 255 or b % 1 ~= 0 then return end
+    end
+    local present = p[1] % 32 >= 16
+    local enabled = p[5] % 32 >= 16
+    local healthy = p[9] % 32 >= 16
+    if present then ap.ready = not enabled or healthy else ap.ready = nil end
+    ap.readyTime = now
+    return
+  end
+  if command ~= 0x80 and command ~= 0x7F then return end
   if p[1] == 0xF0 or p[1] == 0xF2 then passthrough(p, now) return end
   if p[1] ~= 0xF1 or #p < 3 then return end
   local severity = p[2]
@@ -76,11 +94,6 @@ local function receive(command, p, now)
     text = text .. string.char(b >= 32 and b <= 126 and b or 32)
   end
   if not string.find(text, "[^ ]") then return end
-  if string.sub(text, 1, 7) == "PreArm:" then
-    ap.ready, ap.readyTime = false, now
-  elseif text == "Ready to arm" then
-    ap.ready, ap.readyTime = true, now
-  end
   local latest = count > 0 and entry(0)
   if latest and latest.text == text and latest.severity == severity
     and now >= latest.time and now - latest.time <= 300 then
@@ -95,7 +108,7 @@ local function receive(command, p, now)
   count = math.min(count + 1, LIMIT)
   -- Preserve the item being read as newer messages arrive (until eviction).
   if page == 2 and selected > 0 then selected = math.min(selected + 1, count - 1) end
-  if page == 1 or selected > 0 then unread = math.min(unread + 1, LIMIT) end
+  if page ~= 2 or selected > 0 then unread = math.min(unread + 1, LIMIT) end
 end
 
 local function sample(now)
@@ -136,19 +149,32 @@ local function sample(now)
   end
 end
 
-local function background()
+local function background(visible, event)
   local now = getTime()
+  if visible then lastVisible = now end
+  -- A key event can switch to Navigation later in this callback. Reserve its
+  -- drawing budget before consuming frames, even when currently downloading.
+  local budget = visible and (not event or event == 0) and page == 3
+    and params and params.loading() and 2 or 1
   if crossfireTelemetryPop then
     for i = 1, 8 do
       local command, payload = crossfireTelemetryPop()
       if command == nil then break end
-      receive(command, payload, now)
-      -- One custom candidate leaves room for grey fill and proportional wrapping
-      -- inside the permanent-script 10k instruction budget, including bad packets.
-      if command == 0x80 or command == 0x7F then break end
+      if command == 0xAA then
+        if params then params.receive(payload, now) end
+      else receive(command, payload, now) end
+      -- Two parameter packets on the simple loading screen; retain Navigation's
+      -- one-frame budget for grey fill and stop after any status candidate.
+      if command == 0xAA then budget = budget - 1 end
+      if command == 0x80 or command == 0x7F or command == 0xAC or budget == 0 then break end
     end
   end
   sample(now)
+  -- Keys can switch to the expensive Navigation drawing path in this callback.
+  -- Let controls handle them and advance downloads/writes on the next idle tick.
+  if params and (not event or event == 0) then
+    params.tick(now, linked, page == 3 and fresh(lastVisible, now, 30))
+  end
 end
 
 local function init()
@@ -156,13 +182,40 @@ local function init()
   page, sensorIds, sensorUnits, values, linked = 1, {}, {}, {}, false
   discoveryAt, nextSample = nil, nil
   ap = {}
+  params, opening, parameterError, lastVisible = nil, nil, nil, nil
 end
 
 local function controls(event)
   if not event or event == 0 then return end
-  if event == EVT_VIRTUAL_ENTER or event == EVT_ENTER_BREAK or event == EVT_ROT_BREAK then
-    page = page == 1 and 2 or 1
+  -- Consume FIRST where available: on single-PAGE telemetry radios the firmware
+  -- also handles BREAK. Killing the key now suppresses that later event.
+  local nextFirst = killEvents and (EVT_PAGEDN_FIRST or EVT_PAGE_FIRST)
+  local prevFirst = killEvents and EVT_PAGEUP_FIRST
+  local nextPage = event == nextFirst or (not nextFirst and
+    (event == EVT_VIRTUAL_NEXT_PAGE or event == EVT_PAGE_BREAK or event == EVT_PAGEDN_BREAK))
+  local prevPage = event == prevFirst or (not prevFirst and
+    (event == EVT_VIRTUAL_PREV_PAGE or event == EVT_PAGE_LONG or event == EVT_PAGEUP_BREAK))
+  if nextPage or prevPage then
+    if killEvents then killEvents(event) end
+    if page == 3 and params and not params.leave() then return end
+    page = (page - 1 + (prevPage and -1 or 1)) % 3 + 1
     selected, unread = 0, 0
+  elseif page == 3 and params then
+    local action
+    if event == EVT_VIRTUAL_ENTER or event == EVT_ENTER_BREAK or event == EVT_ROT_BREAK then action = 'enter'
+    elseif event == EVT_VIRTUAL_EXIT or event == EVT_EXIT_BREAK then action = 'exit'
+    elseif event == EVT_VIRTUAL_MENU or event == EVT_MENU_BREAK then action = 'menu'
+    elseif params.editing() and (event == EVT_VIRTUAL_INC or event == EVT_VIRTUAL_INC_REPT) then action = 'next'
+    elseif params.editing() and (event == EVT_VIRTUAL_DEC or event == EVT_VIRTUAL_DEC_REPT) then action = 'prev'
+    elseif event == EVT_VIRTUAL_NEXT or event == EVT_VIRTUAL_NEXT_REPT or event == EVT_ROT_RIGHT
+      or event == EVT_DOWN_FIRST or event == EVT_DOWN_REPT then action = 'next'
+    elseif event == EVT_VIRTUAL_PREV or event == EVT_VIRTUAL_PREV_REPT or event == EVT_ROT_LEFT
+      or event == EVT_UP_FIRST or event == EVT_UP_REPT then action = 'prev' end
+    if action and params.input(action, getTime()) then page = 1 end
+  elseif page == 3 then
+    if event == EVT_VIRTUAL_ENTER or event == EVT_ENTER_BREAK or event == EVT_ROT_BREAK
+      or event == EVT_VIRTUAL_MENU or event == EVT_MENU_BREAK then parameterError = nil
+    elseif event == EVT_VIRTUAL_EXIT or event == EVT_EXIT_BREAK then page = 1 end
   elseif event == EVT_VIRTUAL_EXIT or event == EVT_EXIT_BREAK then
     page, selected = 1, 0
   elseif page == 2 then
@@ -292,6 +345,49 @@ local function ball(cx, cy, radius)
   line(cx, cy - radius, cx, cy - radius + 3)
 end
 
+local function markerLine(x1, y1, x2, y2, ground)
+  if color then
+    lcd.setColor(CUSTOM_COLOR, ground and BLACK or WHITE)
+    lcd.drawLine(ox + math.floor(x1 + 0.5), oy + math.floor(y1 + 0.5),
+      ox + math.floor(x2 + 0.5), oy + math.floor(y2 + 0.5), SOLID or 0, ink)
+  else
+    local mode = ground and ERASE or FORCE
+    lcd.drawLine(ox + math.floor(x1 + 0.5), oy + math.floor(y1 + 0.5),
+      ox + math.floor(x2 + 0.5), oy + math.floor(y2 + 0.5), SOLID or 0, ink + (mode or FORCE or 0))
+  end
+end
+
+local function directionMarker(cx, cy, radius, bearing)
+  local a = bearing * math.pi / 180
+  local dx, dy = math.sin(a), -math.cos(a)
+  local tipX, tipY = cx + dx * radius, cy + dy * radius
+  local pitch, roll = values[1], values[2]
+  local sr, cr, offset
+  if pitch and roll then
+    sr, cr = math.sin(roll), math.cos(roll)
+    offset = pitch * radius / (math.pi / 4)
+  end
+  -- Fill a compact triangle with six short scanlines. Split a
+  -- scanline at the horizon when needed so both halves retain contrast.
+  for d = 0, 5 do
+    local half = d * 3 / 5
+    local centerX, centerY = tipX - dx * d, tipY - dy * d
+    local x1, y1 = centerX + dy * half, centerY - dx * half
+    local x2, y2 = centerX - dy * half, centerY + dx * half
+    if not offset then markerLine(x1, y1, x2, y2, false)
+    else
+      local v1 = sr * (x1 - cx) + cr * (y1 - cy) - offset
+      local v2 = sr * (x2 - cx) + cr * (y2 - cy) - offset
+      if (v1 > 0) ~= (v2 > 0) then
+        local t = v1 / (v1 - v2)
+        local middleX, middleY = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
+        markerLine(x1, y1, middleX, middleY, v1 > 0)
+        markerLine(middleX, middleY, x2, y2, v2 > 0)
+      else markerLine(x1, y1, x2, y2, v1 > 0) end
+    end
+  end
+end
+
 local function flightMode(now)
   if values[6] then return values[6] end
   if not fresh(ap.statusTime, now, 300) then return "MODE --" end
@@ -308,9 +404,9 @@ local function flightMode(now)
   return label and string.find(label, "[^ ]") and label or "M" .. ap.mode
 end
 
-local function rightText(y, s, left)
+local function rightText(y, s, left, inverse)
   s = fit(s, width - (left or 0))
-  drawText(width - textWidth(s), y, s)
+  drawText(width - textWidth(s), y, s, inverse)
 end
 
 local function navValue(x, y, label, value)
@@ -319,13 +415,15 @@ local function navValue(x, y, label, value)
 end
 
 local function navigation()
-  local now, state = getTime(), "ARM?"
+  local now, state, stateInverse = getTime(), "READY?", false
   if linked and fresh(ap.statusTime, now, 300) then
-    state = ap.armed and "ARMD" or "RDY?"
-    if not ap.armed and fresh(ap.readyTime, now, 1000) then state = ap.ready and "RDY" or "!RDY" end
+    if ap.armed then state, stateInverse = "ARMED", true
+    elseif fresh(ap.readyTime, now, 300) and ap.ready ~= nil then
+      state, stateInverse = ap.ready and "READY" or "NOT READY", ap.ready
+    end
   end
   text(0, 0, linked and flightMode(now) or "NO LINK", true, width - textWidth(state) - 3)
-  rightText(0, state)
+  rightText(0, state, nil, stateInverse)
   text(0, step, number(values[4], "%.1f") .. "V")
   rightText(step, "LQ " .. number(values[7]) .. "%", math.floor(width / 2))
   local top, bottom = step * 2 + 1, height - step - 2
@@ -340,12 +438,7 @@ local function navigation()
   text(cx + radius + 2, cy - math.floor(step / 2), "E")
   local distance = linked and fresh(ap.homeTime, now, 300) and ap.distance or nil
   if distance and distance >= 2 and ap.bearing then
-    local a = ap.bearing * math.pi / 180
-    local dx, dy = math.sin(a), -math.cos(a)
-    local x, y = cx + dx * radius, cy + dy * radius
-    -- Inward chevron, independent of aircraft yaw and the attitude horizon.
-    line(x, y, x - dx * 5 + dy * 3, y - dy * 5 - dx * 3)
-    line(x, y, x - dx * 5 - dy * 3, y - dy * 5 + dx * 3)
+    directionMarker(cx, cy, radius, ap.bearing)
   end
   local home = distance and (distance >= 1000 and number(distance / 1000, "%.1f") .. "k" or number(distance) .. "m") or "--m"
   -- Distance sits above the fixed aircraft reference, leaving the wings visible.
@@ -358,15 +451,14 @@ local function navigation()
   local speedUnit = sensorUnits[8] == 8 and "mph" or sensorUnits[8] == 4 and "kt"
     or sensorUnits[8] == 5 and "m/s" or sensorUnits[8] == 6 and "ft/s" or "km/h"
   navValue(column, top + step, "ALT", number(values[9]) .. altUnit)
-  navValue(column, top + step * 2, "HOM", home)
+  if top + step * 3 <= bottom then
+    navValue(column, top + step * 2, "GS", number(values[8]) .. speedUnit)
+  end
   if top + step * 4 <= bottom then
-    navValue(column, top + step * 3, "GS", number(values[8]) .. speedUnit)
-  end
-  if top + step * 5 <= bottom then
     local heading = values[3] and (values[3] * 180 / math.pi) % 360
-    navValue(column, top + step * 4, "HDG", number(heading))
+    navValue(column, top + step * 3, "HDG", number(heading))
   end
-  if top + step * 6 <= bottom then navValue(column, top + step * 5, "I", number(values[10], "%.1f") .. "A") end
+  if top + step * 5 <= bottom then navValue(column, top + step * 4, "I", number(values[10], "%.1f") .. "A") end
   line(0, height - step - 1, width - 1, height - step - 1)
   text(0, height - step, count > 0 and entry(0).text or "No messages")
 end
@@ -409,8 +501,23 @@ local function messages()
   end
 end
 
+local function loadParameterModule(name)
+  local base = '/SCRIPTS/MAV/' .. name
+  -- Let EdgeTX compile with its own ABI and fixed 256-byte SD writer. Discard
+  -- the source prototype before loading the stripped cache, so no bytecode-sized
+  -- string or simultaneous source/binary prototypes are required in Lua heap.
+  local chunk = assert(loadScript(base .. '.lua', 'tc'))
+  chunk = nil
+  if collectgarbage then collectgarbage('collect') end
+  chunk = loadScript(base .. '.luac', 'b')
+  -- Builds without LUA_COMPILER open literal names and create no cache.
+  if not chunk then chunk = assert(loadScript(base .. '.lua', 'tx')) end
+  local result = chunk()
+  return result
+end
+
 local function run(event, zone)
-  background()
+  background(true, event)
   controls(event)
   ox, oy = zone and zone.x or 0, zone and zone.y or 0
   width, height = zone and zone.w or LCD_W, zone and zone.h or LCD_H
@@ -426,7 +533,37 @@ local function run(event, zone)
   end
   if width < (color and 256 or 128) or height < (color and 160 or 64) then
     text(0, 0, "MAV: full screen")
-  elseif page == 1 then navigation() else messages() end
+  elseif page == 1 then navigation()
+  elseif page == 2 then messages()
+  elseif params then params.draw(text, rightText, width, height, step)
+  else
+    if not parameterError then
+      if not string.pack or not bit32 or not crossfireTelemetryPush then
+        parameterError = 'Needs EdgeTX 2.11'
+      else
+        -- Reclaim the previous chunk's parser/loader temporaries before loading
+        -- the next one. Only done during opening, never in the telemetry loop.
+        if collectgarbage then collectgarbage('collect') end
+        if opening then
+          local ok, ready = pcall(opening.init, loadParameterModule)
+          if not ok then opening, parameterError = nil, tostring(ready)
+          elseif ready then params, opening = opening, nil end
+        else
+          local ok, result = pcall(loadParameterModule, 'params')
+          if ok then opening = result else parameterError = tostring(result) end
+        end
+      end
+    end
+    text(0, 0, 'PARAMETERS', true)
+    local remaining = parameterError or 'Opening...'
+    for row = 2, math.floor(height / step) - 2 do
+      local part = fit(remaining, width)
+      text(0, step * row, part)
+      remaining = string.sub(remaining, #part + 1)
+      if #remaining == 0 then break end
+    end
+    if parameterError and string.pack then text(0, height - step, 'ENTER: retry') end
+  end
   return 0
 end
 

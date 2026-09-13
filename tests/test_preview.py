@@ -32,6 +32,14 @@ class PixelPreview(unittest.TestCase):
         messages = Image.open(folder / "128x96-messages-native.png")
         self.assertTrue(set(messages.getdata()) <= {0, 255})
 
+    def test_parameters_use_only_native_binary_pixels(self):
+        runner = ROOT / (".build/lua53.exe" if sys.platform == "win32" else ".build/lua53")
+        subprocess.run([sys.executable, "tools/preview.py", "--lua", str(runner), "--parameters"],
+                       cwd=ROOT, check=True, capture_output=True)
+        for path in (ROOT / 'dist/previews').glob('*-parameters-*-native.png'):
+            pixels = Image.open(path)
+            self.assertEqual(set(pixels.getdata()), {0, 255}, str(path))
+
 
 if __name__ == "__main__":
     unittest.main()

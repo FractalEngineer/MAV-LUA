@@ -1,11 +1,13 @@
-"""Build a source package and optional stripped Lua 5.2 Tango candidate."""
+"""Build modern source and legacy precompiled radio packages."""
 import argparse
 import hashlib
+import os
 import re
 from pathlib import Path
 import shutil
 import subprocess
 import tarfile
+import time
 import urllib.request
 import zipfile
 
@@ -69,19 +71,31 @@ def package(compiler=None, compiler53=None, version="dev"):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", version):
         raise SystemExit("Invalid package version")
     BUILD.mkdir(exist_ok=True)
-    dist = ROOT / "dist"
-    dist.mkdir(exist_ok=True)
+    compiler = compiler or BUILD / ("luac.exe" if os.name == "nt" else "luac")
+    if not Path(compiler).is_file():
+        raise SystemExit("A legacy compiler is required: use --bootstrap or --luac PATH")
+    dist = ROOT / "dist" / version
+    dist.mkdir(parents=True, exist_ok=True)
+    # Firmware compares source/cache modification times. Never stamp new source
+    # with a fixed old date. Release CI can use the tag's SOURCE_DATE_EPOCH.
+    epoch = int(os.environ.get("SOURCE_DATE_EPOCH", time.time()))
+    timestamp = time.gmtime(epoch)[:6] if "SOURCE_DATE_EPOCH" in os.environ else time.localtime(epoch)[:6]
     files = sorted((ROOT / "src").rglob("*.lua"))
     outputs = []
-    targets = [("pre", None), ("post", None)]
-    if compiler:
-        targets.append(("pre", compiler))
+    # Modern bytecode is a host validation artifact, never a third deliverable.
     if compiler53:
-        targets.append(("post", compiler53))
-    for family, target_compiler in targets:
+        for path in files:
+            rel = path.relative_to(ROOT / "src")
+            compiled = BUILD / "post" / rel
+            compiled.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run([str(compiler53), "-s", "-o", str(compiled), str(path)], check=True)
+            validate53(compiled.read_bytes())
+            if rel.as_posix() == "SCRIPTS/TELEMETRY/MAV.lua":
+                (BUILD / "MAV-post.lua").write_bytes(compiled.read_bytes())
+    for kind, target_compiler in (("source", None), ("precompiled", compiler)):
         binary = target_compiler is not None
-        kind = "compiled" if binary else "source"
-        name = f"MAV-LUA-{version}-{family}-edgetx-2.11rc1-{kind}.zip"
+        family = "pre" if binary else "post"
+        name = f"MAV-LUA-{version}_{kind}.zip"
         output = dist / name
         staging = output.with_suffix(".zip.tmp")
         with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -101,32 +115,35 @@ def package(compiler=None, compiler53=None, version="dev"):
                         (BUILD / ("MAV.lua" if family == "pre" else "MAV-post.lua")).write_bytes(data)
                 else:
                     data = path.read_bytes()
-                info = zipfile.ZipInfo(rel, date_time=(2026, 1, 1, 0, 0, 0))
+                info = zipfile.ZipInfo(rel, date_time=timestamp)
                 info.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(info, data)
                 if binary:
                     # Firmware may prefer a same-name .luac cache when present.
                     # Replace both names so an older cache cannot shadow a fix.
                     info = zipfile.ZipInfo(str(Path(rel).with_suffix(".luac")).replace("\\", "/"),
-                                           date_time=(2026, 1, 1, 0, 0, 0))
+                                           date_time=timestamp)
                     info.compress_type = zipfile.ZIP_DEFLATED
                     archive.writestr(info, data)
-            for doc in ("README.md", "CHANGELOG.md", "LICENSE", "docs/images/navigation.png", "docs/images/messages.png"):
-                info = zipfile.ZipInfo(doc, date_time=(2026, 1, 1, 0, 0, 0))
+            docs = ["README.md", "CHANGELOG.md", "LICENSE"]
+            docs += [p.relative_to(ROOT).as_posix() for p in sorted((ROOT / 'docs/images').glob('*.png'))]
+            for doc in docs:
+                info = zipfile.ZipInfo(doc, date_time=timestamp)
                 info.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(info, (ROOT / doc).read_bytes())
-            info = zipfile.ZipInfo("VERSION.txt", date_time=(2026, 1, 1, 0, 0, 0))
-            archive.writestr(info, f"{version}\n{family}-edgetx-2.11rc1\n{kind}\n")
+            info = zipfile.ZipInfo("VERSION.txt", date_time=timestamp)
+            compatibility = "Before EdgeTX 2.11 RC1" if binary else "EdgeTX 2.11 RC1 or newer"
+            archive.writestr(info, f"{version}\n{kind}\n{compatibility}\nPages: Navigation, Messages, Parameters\nPAGE changes pages; ENTER selects\nParameters require EdgeTX 2.11 and the ELRS TX bridge\n")
             if binary:
                 for path in files:
                     rel = path.relative_to(ROOT / "src").as_posix()
-                    info = zipfile.ZipInfo("SOURCE/" + rel, date_time=(2026, 1, 1, 0, 0, 0))
+                    info = zipfile.ZipInfo("SOURCE/" + rel, date_time=timestamp)
                     info.compress_type = zipfile.ZIP_DEFLATED
                     archive.writestr(info, path.read_bytes())
         staging.replace(output)
         outputs.append(output)
     (dist / "SHA256SUMS.txt").write_text("".join(
-        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in outputs))
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in outputs), newline="\n")
     print((dist / "SHA256SUMS.txt").read_text(), end="")
 
 
@@ -134,8 +151,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bootstrap", action="store_true", help="Download/check Lua sources and build with gcc")
     parser.add_argument("--archive", type=Path, help="Use an already downloaded Lua 5.2.4 tarball")
-    parser.add_argument("--luac", type=Path, help="Compile Tango candidate using a firmware-compatible Lua 5.2 compiler")
-    parser.add_argument("--luac-post", type=Path, help="EdgeTX int32/float32 Lua 5.3 compiler")
+    parser.add_argument("--luac", type=Path, help="Legacy firmware-compatible Lua 5.2 compiler")
+    parser.add_argument("--luac-post", type=Path, help="Optional Lua 5.3 compiler for host validation only; no additional ZIP")
     parser.add_argument("--version", default="dev", help="Release tag or dev; included in all artifact names")
     parser.add_argument("--toolchain-only", action="store_true")
     args = parser.parse_args()

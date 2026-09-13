@@ -19,9 +19,9 @@ end
 local function fixture(w, h, modern)
   local f = {now = 0, rssi = 0, queue = {}, reads = 0, calls = {}, sensors = {}, probes = 0}
   local env = {LCD_W = w or 128, LCD_H = h or 96, SOLID = 0, INVERS = 1,
-    math = math, string = string, type = type, FORCE = 2}
+    math = math, string = string, type = type, FORCE = 2, ERASE = 4}
   -- Deliberately omit table, bit32, CENTERED, loadScript, and every optional event.
-  env.EVT_ENTER_BREAK, env.EVT_EXIT_BREAK = 10, 11
+  env.EVT_PAGE_BREAK, env.EVT_EXIT_BREAK = 10, 11
   env.EVT_VIRTUAL_NEXT, env.EVT_VIRTUAL_PREV = 12, 13
   env.getTime = function() return f.now end
   env.getRSSI = function() return f.rssi end
@@ -111,13 +111,21 @@ local function fixture(w, h, modern)
     if not more then f.queue[#f.queue + 1] = {0x80, p} end
     return p
   end
+  function f.status(present, enabled, healthy)
+    local p = {}
+    for i = 1, 12 do p[i] = 0 end
+    if present then p[1] = 16 end
+    if enabled then p[5] = 16 end
+    if healthy then p[9] = 16 end
+    f.queue[#f.queue + 1] = {0xAC, p}
+  end
   return f
 end
 
 local f = fixture()
 check(f.render():find("NO LINK", 1, true), "empty navigation indicates missing link")
 check(f.render(10):find("No messages", 1, true), "empty history")
-check(up(f.control, "page") == 2, "Enter changes page")
+check(up(f.control, "page") == 2, "PAGE changes page")
 f.app.run(nil)
 check(up(f.control, "page") == 2, "nil event must not equal missing constants")
 f.push("PreArm: GPS", 4)
@@ -176,6 +184,11 @@ for i = 1, 30 do f.push("Message " .. i) end
 f.reads = 0
 f.app.background()
 check(f.reads == 1 and #f.queue == 29, "custom callback budget leaves packets queued")
+while #f.queue > 0 do f.app.background() end
+for i = 1, 8 do f.status(true, true, i % 2 == 0) end
+f.reads = 0
+f.app.background()
+check(f.reads == 1 and #f.queue == 7, "system-status callback budget leaves packets queued")
 while #f.queue > 0 do f.app.background() end
 check(f.state("count") == 20 and #f.state("history") == 20, "bounded history")
 check(f.state("history")[f.state("head")].text == "Message 30", "newest entry")
@@ -308,21 +321,28 @@ local p = f.data(0x5007, 16777216 + 1, {0xF2, 2}) -- plane
 f.data(0x5001, 6 + 256, p) -- FBWA, armed
 f.queue = {{0x80, p}}
 screen = f.render()
-check(screen:find("FBWA", 1, true) and screen:find("ARMD", 1, true), "F2 mode family and explicit armed bit")
+check(screen:find("FBWA", 1, true) and screen:find("ARMED", 1, true), "F2 mode family and explicit armed bit")
 f.data(0x5004, 123 * 4 + 90 * 33554432) -- 123 m; home west => craft east
 screen = f.render()
 local ap = up(up(f.receive, "passthrough"), "ap")
 check(ap.distance == 123 and ap.bearing == 90, "home bearing reversed to craft FROM home")
-check(screen:find("HOM\n123m", 1, true), "home in data list")
+check(not screen:find("HOM", 1, true), "home distance is not duplicated in data list")
 bounds(f)
-local atRight, grey, overlay, eastMarker = false, false, false, false
+local atRight, armedInverse, grey, overlay, eastMarker = false, false, false, false, false
+local markerLight, markerDark = false, false
 for _, c in ipairs(f.calls) do
   if c[1] == "text" and c[4] == "123m" and c[2] < 64 then overlay = true end
-  if c[1] == "text" and c[4] == "ARMD" and c[2] + f.measure(c[4]) == 128 then atRight = true end
+  if c[1] == "text" and c[4] == "ARMED" and c[2] + f.measure(c[4]) == 128 then
+    atRight, armedInverse = true, c[5] == 1
+  end
   if c[1] == "line" and c[6] == 8 * 65536 + 2 then grey = true end
-  if c[1] == "line" and c[2] == 55 and c[3] == 52 and c[4] == 50 then eastMarker = true end
+  if c[1] == "line" and c[2] == 55 and c[3] == 52 and c[4] == 55 and c[5] == 52 then eastMarker = true end
+  if c[1] == 'line' and c[2] == c[4] and c[2] >= 50 and c[2] <= 55 then
+    if c[6] == 2 then markerLight = true elseif c[6] == 4 then markerDark = true end
+  end
 end
-check(atRight and overlay and grey and eastMarker, "native width, grey FORCE fill, distance overlay and east marker")
+check(atRight and armedInverse and overlay and grey and eastMarker and markerLight and markerDark,
+  "native width, inverted ARMED, grey fill, distance overlay and contrast-filled east marker")
 f.sensors.Yaw.value = 1.5
 f.render()
 check(ap.bearing == 90, "home dial does not rotate with heading")
@@ -335,25 +355,55 @@ f.data(0x5004, 321 * 4 + 2)
 f.render()
 check(ap.distance == 32100, "home decimal exponent")
 f.data(0x5004, 0)
-check(f.render():find("HOM\n--m", 1, true), "zero home distance is not invented home lock")
+check(f.render():find("--m", 1, true), "zero home distance is not invented home lock")
 f.data(0x5001, 6)
-check(f.render():find("RDY?", 1, true), "disarmed does not imply prearm readiness")
+check(f.render():find("READY?", 1, true), "disarmed state without SYS_STATUS keeps readiness unknown")
+f.status(true, true, false)
+check(f.render():find("NOT READY", 1, true), "enabled failing MAVLink pre-arm check is not ready")
+local notReadyNormal = false
+for _, c in ipairs(f.calls) do
+  if c[1] == 'text' and c[4] == 'NOT READY' then notReadyNormal = c[5] == 0 end
+end
+check(notReadyNormal, 'NOT READY is not inverted')
 f.push("PreArm: GPS", 4)
-check(f.render():find("!RDY", 1, true), "explicit prearm warning")
+check(f.render():find("NOT READY", 1, true), "prearm warning does not replace live readiness")
 check(f.calls[#f.calls][1] == "text" and f.calls[#f.calls][3] == 87
   and f.calls[#f.calls][4] == "PreArm: GPS", "latest message occupies bottom nav line")
 f.push("Ready to arm", 6)
-check(f.render():find("RDY\n", 1, true), "explicit ready message")
-f.now = f.now + 1001
+check(f.render():find("NOT READY", 1, true), "ready message does not override failing SYS_STATUS")
+f.status(true, true, true)
+check(f.render():find("READY", 1, true), "healthy enabled MAVLink pre-arm check is ready")
+local readyInverse = false
+for _, c in ipairs(f.calls) do
+  if c[1] == 'text' and c[4] == 'READY' then readyInverse = c[5] == 1 end
+end
+check(readyInverse, 'READY is inverted')
+f.status(true, false, false)
+check(f.render():find("READY", 1, true), "disabled arming checks follow Mission Planner readiness semantics")
+f.status(false, false, false)
+check(f.render():find("READY?", 1, true), "missing pre-arm capability is distinguishable")
+f.status(true, true, false)
+f.render()
+local readyTime = ap.readyTime
+f.queue = {{0xAC, {16,0,0,0,16,0,0,0,16,0,0,"bad"}}}
+f.app.background()
+check(ap.ready == false and ap.readyTime == readyTime, "malformed system status cannot change readiness")
+f.queue = {{0xAC, {16,0,0,0,16,0,0,0,16,0,0,0,0}}}
+f.app.background()
+check(ap.ready == false and ap.readyTime == readyTime, "overlong system status cannot change readiness")
+f.now = f.now + 301
 f.data(0x5001, 6)
-check(f.render():find("RDY?", 1, true), "readiness text expires even with live AP status")
+check(f.render():find("READY?", 1, true), "stale readiness stays unknown despite fresh disarmed state")
 f.data(0x5001, 262)
 f.render()
+f.push('PreArm: GPS', 4)
+check(f.render():find('ARMED', 1, true), 'warning text cannot override confirmed armed state')
 f.data(0x5001, 6)
-check(f.render():find("RDY?", 1, true), "arm/disarm transition clears readiness")
+f.status(true, true, true)
+check(f.render():find("READY", 1, true), "arm/disarm transition returns to current readiness")
 f.now = f.now + 301
 screen = f.render()
-check(screen:find("ARM?", 1, true) and screen:find("MODE --", 1, true), "AP status freshness expires independently of link")
+check(screen:find("READY?", 1, true) and screen:find("MODE --", 1, true), "AP and readiness freshness expire independently of link")
 f.data(0x5007, 16777216 + 2)
 f.app.background()
 f.data(0x5001, 6)
@@ -379,10 +429,25 @@ for _, invalid in ipairs({{0xF2, 10}, {0xF2, 0}, {0xF2, 1.5}, {0xF2, 0/0}, {0xF0
   f.app.background()
 end
 check(ap.mode == previous, "truncated, oversized and invalid-byte passthrough rejected")
+-- ELRS's earlier sizeof(frame) instead of sizeof(frame.p) adds four bytes.
+p = f.data(0x5007, 16777217, {0xF2,2})
+f.data(0x5001, 262, p)
+for _,b in ipairs({0,123,200,42}) do p[#p+1]=b end
+f.queue={{0x80,p}}
+check(f.render():find('ARMED',1,true), 'legacy padded ELRS F2 restores arm state')
+f.now = f.now + 301
+p = f.data(0x5001, 6, {0xF0})
+for _,b in ipairs({0,123,200,42}) do p[#p+1]=b end
+f.queue={{0x80,p}}
+check(f.render():find('READY?',1,true), 'legacy padded ELRS F0 follows disarm without inventing readiness')
+p[#p]='bad'
+f.queue={{0x80,p}}
+f.app.background()
+check(ap.armed==false, 'non-byte legacy padding remains invalid')
 f.rssi = 0
 f.render()
 f.rssi = 99
-check(f.render():find("ARM?", 1, true) and ap.vehicle == nil, "reconnect requires fresh state and vehicle type")
+check(f.render():find("READY?", 1, true) and ap.vehicle == nil, "reconnect requires fresh state and vehicle type")
 
 -- Real font measurement uses the full width and shrinks previews only when safe.
 f = fixture()

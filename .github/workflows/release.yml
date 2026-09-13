@@ -20,14 +20,17 @@ jobs:
           python tools/build.py --bootstrap --toolchain-only
           python tools/build53.py
           python tools/firmware_test.py
-      - name: Test and package both Lua families
+      - name: Test and package source and precompiled
         run: |
           .build/lua tests/test_mav.lua
           .build/lua53 tests/test_mav.lua
           .build/lua tests/test_widget.lua
-          python tools/build.py --luac .build/luac --luac-post .build/luac53 --version "$GITHUB_REF_NAME"
+          .build/lua53 tests/test_params.lua
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct "$GITHUB_REF_NAME") python tools/build.py --luac .build/luac --luac-post .build/luac53 --version "$GITHUB_REF_NAME"
           .build/lua tests/test_package.lua
           .build/lua53 tests/test_package.lua .build/MAV-post.lua
+          .build/lua53 tests/test_params.lua .build/post
+          .build/lua53 tests/test_pipeline.lua .build/post
           .build/lua-freedomtx140 tests/test_freedomtx140.lua .build/MAV.lua
           python -m unittest discover -s tests -p 'test_*.py'
       - name: Publish tag notes and assets
@@ -38,4 +41,4 @@ jobs:
           if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --verify-tag --title "MAV-LUA $GITHUB_REF_NAME" --notes-file .build/tag-notes.txt
           fi
-          gh release upload "$GITHUB_REF_NAME" dist/MAV-LUA-"$GITHUB_REF_NAME"-*.zip dist/SHA256SUMS.txt --clobber
+          gh release upload "$GITHUB_REF_NAME" dist/"$GITHUB_REF_NAME"/MAV-LUA-"$GITHUB_REF_NAME"_*.zip dist/"$GITHUB_REF_NAME"/SHA256SUMS.txt --clobber

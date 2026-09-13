@@ -1,8 +1,8 @@
 -- Desktop drawing recorder. Runs the real display code with sample telemetry.
 LCD_W, LCD_H = tonumber(arg[2]) or 128, tonumber(arg[3]) or 96
-SOLID, INVERS, FORCE = 0, 2, 2
+SOLID, INVERS, FORCE, ERASE = 0, 2, 2, 4
 GREY = function(n) return n * 65536 end
-EVT_ENTER_BREAK = 10
+EVT_PAGE_BREAK = 10
 local sensors = {Ptch = 0.12, Roll = 0.3, Yaw = -1.5, RxBt = 16.4,
   Sats = 14, RQly = 98, GSpd = 42, GAlt = 123, Curr = 3.2}
 getTime = function() return 1200 end

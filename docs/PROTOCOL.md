@@ -4,9 +4,9 @@
 
 [EdgeTX's CRSF dispatcher](https://github.com/EdgeTX/edgetx/blob/main/radio/src/telemetry/crossfire.cpp) handles GPS, battery, attitude, flight mode and link statistics as firmware telemetry sensors. Unhandled frames are forwarded to the Lua telemetry queue. Reading ordinary attitude/GPS frames only through `crossfireTelemetryPop()` would therefore leave Navigation empty on normal firmware.
 
-MAV reads ten known sensor names. It pops at most eight packets per callback through one `crossfireTelemetryPop()` call site, stopping after **one custom-command candidate**, including malformed or unsupported payloads. Both `run()` and `background()` use that same dispatcher so collection continues while the telemetry page is hidden. Other permanent script consumers must not share that raw queue.
+MAV reads ten known sensor names. It pops at most eight packets per callback through one `crossfireTelemetryPop()` call site, stopping after **one custom-command candidate**, including malformed or unsupported payloads. A visible, idle Parameters download may consume a bounded second parameter candidate. Both `run()` and `background()` use that same dispatcher so collection continues while the telemetry page is hidden. Other permanent script consumers must not share that raw queue.
 
-The custom-frame limit matters: [OpenTX's permanent-script budget](https://github.com/opentx/opentx/blob/2.3/radio/src/lua/interface.cpp) is 10,000 Lua instructions per callback. r3 reserves drawing headroom for grey fill, home navigation and proportional wrapping. Tests exercise full-length text and nine-tuple passthrough packets with full history and extreme attitude. The firmware queue is finite, so sustained traffic faster than the callback drain rate can still lose messages. There is no delivery acknowledgement or loss recovery in this status conversion.
+The custom-frame limit matters: [OpenTX's permanent-script budget](https://github.com/opentx/opentx/blob/2.3/radio/src/lua/interface.cpp) is 10,000 Lua instructions per callback. MAV reserves drawing headroom for grey fill, home navigation and proportional wrapping. Tests exercise full-length text and nine-tuple passthrough packets with full history and extreme attitude. The firmware queue is finite, so sustained traffic faster than the callback drain rate can still lose messages. There is no delivery acknowledgement or loss recovery in this status conversion.
 
 API references: [getValue](https://luadoc.edgetx.org/2.11/lua-api-reference/variables/getvalue), [crossfireTelemetryPop](https://luadoc.edgetx.org/edgetx_2.4/part_iii_-_opentx_lua_api_reference/general-functions-less-than-greater-than-luadoc-begin-general/crossfiretelemetrypop), [current firmware value/validity implementation](https://github.com/EdgeTX/edgetx/blob/main/radio/src/lua/api_general.cpp), [unit enumeration](https://github.com/EdgeTX/edgetx/blob/main/radio/src/dataconstants.h).
 
@@ -25,7 +25,15 @@ This specific Lua contract has no destination/origin prefix before the subtype. 
 
 Severity 0–7 renders as EMR, ALR, CRT, ERR, WRN, NOT, INF, DBG; 0–3 get `!`. Other integral byte values render as UNK. Reject malformed bytes before constructing a message string. Stop at NUL; bytes beyond the first 50 or after NUL are not displayed. No chunk IDs are transmitted by this conversion, so concatenating fragments would risk combining unrelated messages.
 
-## AP state and home payloads (r3)
+## Ready-to-arm system status
+
+The matching ELRS TX converter forwards MAVLink `SYS_STATUS` as standard CRSF frame `0xAC`: three big-endian uint32 masks in `present`, `enabled`, `health` order. EdgeTX 2.11 does not decode this frame as a sensor, so its default CRSF path delivers the twelve payload bytes unchanged to Lua. The Lua decoder reads bit 28 directly from the first byte of each disjoint field, avoiding uint32 assembly under EdgeTX's int32/float32 Lua ABI.
+
+`MAV_SYS_STATUS_PREARM_CHECK` is authoritative only when present. While disarmed, `READY` means the check is disabled or healthy, `NOT READY` means it is enabled and unhealthy, and `READY?` means the capability, readiness frame, or explicit arm state is absent/stale. Armed state still comes from passthrough `0x5001` and displays `ARMED`; this matters because ArduPilot reports the pre-arm bit healthy after arming. Only `READY` and `ARMED` use inverse video. Both signals expire after three seconds and clear on link loss. `STATUSTEXT` remains informational and never changes readiness.
+
+This matches Mission Planner's `connected && (health.prearm || !enabled.prearm)` rule. The matching TX bridge observes a fresh ArduPilot heartbeat and requests one-shot `SYS_STATUS` at most once per second while the message is missing or older than two seconds; an active `EXT_STAT` stream suppresses those requests. This path does not depend on opening or loading Parameters.
+
+## AP state and home payloads
 
 The same custom commands carry `0xF0` single tuples and `0xF2` counted tuples. `F0` is seven bytes: subtype, little-endian uint16 ID, little-endian uint32 value. `F2` starts with subtype and count, followed by exactly `count` six-byte tuples. Counts 1–9 are accepted. Length and all bytes are validated before changing any state. Unknown IDs are ignored. Arithmetic decoding avoids a dependency on `bit32`.
 
@@ -37,34 +45,34 @@ The same custom commands carry `0xF0` single tuples and `0xF2` counted tuples. `
 
 Sources: [ELRS converter and HOME_POSITION handling](https://github.com/ExpressLRS/ExpressLRS/blob/master/src/lib/MAVLink/MAVLink.cpp), [ELRS bit packing](https://github.com/ExpressLRS/ExpressLRS/blob/master/src/lib/MAVLink/ardupilot_custom_telemetry.cpp), [ArduPilot native passthrough](https://github.com/ArduPilot/ardupilot/blob/master/libraries/AP_Frsky_Telem/AP_Frsky_SPort_Passthrough.cpp). The packing helper's home-bearing comment says aircraft-relative, but its caller computes absolute bearing from geographic coordinates; the dial follows that calculation.
 
-AP status and home each have a three-second freshness timer. Readiness is only an explicit text report (`PreArm:` or exact `Ready to arm`) with a ten-second lifetime, cleared by an armed-state transition. `RDY?` is disarmed with unknown readiness; `ARM?` means no fresh arm-state report. A blank/numeric `FM` sensor falls back to custom mode. Unknown families/IDs remain numeric. No ArduPilot parameter requests or writes occur.
+AP status and home each have a three-second freshness timer. The armed bit gates the primary indicator as described above; it is not itself readiness. A blank/numeric `FM` sensor falls back to custom mode. Unknown families/IDs remain numeric. These status tuples do not request or write autopilot parameters.
 
-ELRS's home conversion can emit zero distance before receiving home coordinates. The script therefore hides zero home distance, rejects reserved bearings ≥360°, and hides the chevron below two metres. This does not add a home-lock flag to the transport; compare against the ground station during hardware acceptance.
+ELRS's home conversion can emit zero distance before receiving home coordinates. The script therefore hides zero home distance, rejects reserved bearings ≥360°, and hides the filled direction triangle below two metres. Its small scanlines split at the attitude horizon so it is white over the dark half and black over grey ground. This does not add a home-lock flag to the transport; compare against the ground station during hardware acceptance.
 
-## Proportional text and grey drawing (r3)
+## Proportional text and grey drawing
 
 Use `lcd.getTextWidth` where exported. FreedomTX instead exports `lcd.getLastRightPos`: a normal-font measurement draw at `(0, LCD_H + 1)` advances that cursor while its pixel bounds checks discard the entire glyph. Measurements occur only during visible `run()`, never in background. Strings that cross the physical right edge may measure conservatively because clipped glyphs stop being condensed; binary fitting still finds an in-bounds prefix. Firmware with neither API retains a conservative fixed-width fallback. No font cache or bitmap is retained.
 
 Ground scanlines are clipped to the circle and banked horizon. On Tango, `GREY(8)` supplies the grey level and `FORCE` avoids XOR holes in foreground strokes. Color uses solid grey bands; one-bit displays retain spaced lines. Firmware references: [text cursor, glyph clipping and grey pixel implementation](https://github.com/tbs-fpv/freedomtx/blob/2.3-freedomtx/radio/src/gui/common/stdlcd/lcd_4bits.cpp), [Lua LCD API](https://github.com/tbs-fpv/freedomtx/blob/2.3-freedomtx/radio/src/lua/api_lcd.cpp).
 
-### FreedomTX 1.40 runtime corrections (r4)
+### FreedomTX 1.40 runtime correction
 
-The [1.40 VM](https://github.com/tbs-fpv/freedomtx/blob/Release_V1.40/radio/src/thirdparty/Lua/src/lvm.c) falls through from `OP_TAILCALL` into `OP_RETURN` after calling C. With zero arguments, the call instruction's `B=1` becomes a zero-result return. Thus `return lcd.getLastRightPos()` returns no value, and r3 fails on Navigation's first width subtraction. Assigning the C result to a local and returning that value avoids the defective path. `textWidth` also falls back if a measurement API returns nil. The packager now rejects zero-argument tail-call instructions.
+The [1.40 VM](https://github.com/tbs-fpv/freedomtx/blob/Release_V1.40/radio/src/thirdparty/Lua/src/lvm.c) falls through from `OP_TAILCALL` into `OP_RETURN` after calling C. With zero arguments, the call instruction's `B=1` becomes a zero-result return. Assigning the C result to a local before returning avoids the defective path. `textWidth` also falls back if a measurement API returns nil. The packager rejects zero-argument tail-call instructions.
 
-`tools/firmware_test.py` reproduces that fallthrough in a separate host runner and registers a native C cursor getter. The old r3 source reproduced the reported arithmetic error at Navigation line 319; the corrected source and stripped artifact are tested with that same defect present. A Lua-function cursor mock does not expose this C-call bug.
+`tools/firmware_test.py` reproduces that fallthrough in a separate host runner and registers a native C cursor getter. The original firmware failure is reproduced by the fixture; the corrected source and stripped artifact are tested with the same defect present. A Lua-function cursor mock does not expose this C-call bug.
 
 The [1.40 type names](https://github.com/tbs-fpv/freedomtx/blob/Release_V1.40/radio/src/thirdparty/Lua/src/ltm.c) include `lightfunction` for native read-only functions. Grey capability detection accepts both `function` and `lightfunction`. Radio text remains native black/white `lcd.drawText`; desktop previews now use the original firmware bitmap glyphs. No smoothing, fonts, or grey text have been added to the radio runtime.
 
 ## Memory contract
 
-- One retained script on monochrome radios, with no dynamic module loading.
+- One retained core script on monochrome radios; optional parameter chunks load only on supported modern firmware.
 - Twenty reusable history-entry tables and at most 50 text bytes per entry.
 - Ten cached sensor identifiers/units and ten current values; no enumeration of all sensors.
 - No dependency on the global `table` library, `bit32`, `CENTERED`, images, localization or third-party Lua libraries.
 - Only visible rows and the selected entry's preview are formatted for display; no retained wrapped-line cache.
 - No queued message popups. Status history, its unread count and Navigation's latest-message line carry notifications.
 
-The reference's [integrated handoff](https://github.com/FractalEngineer/OpenTX-Telemetry-Widget/blob/status-messages/CODEX_HANDOFF_EdgeTX_MAVLink_Status_Messages.md) reports that earlier full-INAV combinations still ran out of memory after receiving messages. Its [standalone handoff](https://github.com/FractalEngineer/OpenTX-Telemetry-Widget/blob/status-messages/CODEX_HANDOFF_Discrete_MAVLink_Status_Screen.md) supplies the constraints used here. This repository extends that standalone architecture with the user's requested small Navigation page; it does not reuse the failed integrated architecture.
+The Parameters page additionally retains at most eight decoded rows and four outstanding request slots. It does not retain a complete parameter list or write a parameter database to SD.
 
 ## Bytecode
 

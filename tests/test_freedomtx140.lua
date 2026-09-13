@@ -6,7 +6,7 @@ local function safe() local result = firmwareCursor() return result end
 assert(broken() == nil and safe() == 24, "runner must reproduce FreedomTX's lost tail-call return")
 
 LCD_W, LCD_H, SOLID, INVERS, FORCE = 128, 96, 0, 2, 2
-EVT_ENTER_BREAK = 10
+EVT_PAGE_BREAK = 10
 GREY = function(n) return n * 65536 end
 local hostType = type
 type = function(value)

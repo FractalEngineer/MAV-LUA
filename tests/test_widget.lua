@@ -2,6 +2,7 @@
 local draws, runs, backgrounds, inits = {}, {}, 0, 0
 EVT_TOUCH_TAP, EVT_TOUCH_SLIDE = 20, 21
 EVT_VIRTUAL_ENTER, EVT_VIRTUAL_NEXT, EVT_VIRTUAL_PREV = 30, 31, 32
+EVT_VIRTUAL_NEXT_PAGE, EVT_VIRTUAL_PREV_PAGE = 33, 34
 local fail = false
 local app = {
   init = function() inits = inits + 1 end,
@@ -9,7 +10,7 @@ local app = {
   run = function(event, zone) runs[#runs + 1] = {event, zone} end,
 }
 loadScript = function(path, mode)
-  assert(path == "/SCRIPTS/TELEMETRY/MAV" and mode == "bt", "extension-neutral loader")
+  assert(path == "/SCRIPTS/TELEMETRY/MAV.lua" and mode == (string.pack and "tx" or "bt"), "explicit filename; source on modern firmware, binary on legacy")
   if fail then return nil, "not enough memory" end
   return function() return app end
 end
@@ -30,6 +31,10 @@ widget.refresh(instance, EVT_TOUCH_SLIDE, {swipeUp = true})
 assert(runs[#runs][1] == EVT_VIRTUAL_NEXT)
 widget.refresh(instance, EVT_TOUCH_SLIDE, {swipeDown = true})
 assert(runs[#runs][1] == EVT_VIRTUAL_PREV)
+widget.refresh(instance, EVT_TOUCH_SLIDE, {swipeLeft = true})
+assert(runs[#runs][1] == EVT_VIRTUAL_NEXT_PAGE)
+widget.refresh(instance, EVT_TOUCH_SLIDE, {swipeRight = true})
+assert(runs[#runs][1] == EVT_VIRTUAL_PREV_PAGE)
 widget.update(instance, {})
 fail = true
 local broken = widget.create(zone, {})
