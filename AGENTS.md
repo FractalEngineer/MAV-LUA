@@ -1,8 +1,8 @@
 # MAV-LUA development guide
 
-## Latest handoff — 2026-09-14
+## Latest handoff — 2026-09-15
 
-Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.2 is the hardware-confirmed baseline for Navigation, Messages, ready-to-arm status, and bounded parameter browsing. Its known usability limitation is slow refetching at each eight-row parameter boundary. The next priority is bounded neighboring-window prefetch/cache, not another full-list download.
+Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.3 is the hardware-confirmed baseline for Navigation, Messages, ready-to-arm status, and category-first ArduPilot parameter browsing. The next feature line is the firmware-agnostic transport and radio-side adapter work in [docs/V0.2.0-ROADMAP.md](docs/V0.2.0-ROADMAP.md).
 
 ## Working agreement
 
@@ -11,13 +11,13 @@ Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.2 is the hardware-confirme
 - Use one telemetry queue consumer. Parameter code receives packets from the core dispatcher and must not pop the CRSF queue itself.
 - Parameter traffic is opt-in. Never write on scroll or during editing. Require explicit Save and matching autopilot readback before reporting success.
 - Do not equate CRSF device parameters with autopilot parameters. Stock ExpressLRS telemetry does not expose a raw autopilot parameter stream to handset Lua.
-- Keep parameter state bounded. Do not restore the full-list download, SD parameter database, or `params.tmp`; those designs failed on radio.
+- Keep parameter state bounded. Do not restore the full live-list download, runtime SD database writes, or `params.tmp`; those designs failed on radio. Packaged immutable `.pdb` name assets are intentional.
 - Preserve LICENSE/SPDX and desktop font notices.
 - Never rewrite a release tag. New releases ship exactly two ZIPs plus `SHA256SUMS.txt`; historical assets remain unchanged.
 
 ## Hardware and compatibility
 
-The v0.1.2 parameter browser and readiness path are confirmed on a TBS Alpha running EdgeTX 2.11, connected to a RadioMaster Zorro internal ELRS module through the full-duplex external-bay serial interface. Reported link settings are 333 Hz Full and 940k handset baud. Navigation and Messages were also tested on Tango 2/FreedomTX 1.4.0.
+The v0.1.3 parameter browser and readiness path are confirmed with ArduPilot Plane 4.8 on a TBS Alpha running EdgeTX 2.11, connected to a RadioMaster Zorro internal ELRS module through the full-duplex external-bay serial interface. Reported link settings are 333 Hz Full and 940k handset baud. Navigation and Messages were also tested on Tango 2/FreedomTX 1.4.0.
 
 EdgeTX 2.11 RC1 changed from Lua 5.2 to Lua 5.3 and uses int32/float32. Decode disjoint packed byte fields directly; assembling uint32 values can overflow integers or discard low float bits. Modern-only modules must remain lazily loaded after capability checks so the core still parses on Lua 5.2.
 
@@ -35,7 +35,7 @@ python tools/firmware_test.py
 .build/lua53.exe tests/test_params.lua
 .build/lua53.exe tests/test_pipeline.lua
 python -m unittest discover -s tests -p "test_*.py"
-python tools/build.py --luac .build/luac.exe --luac-post .build/luac53.exe --version v0.1.2
+python tools/build.py --luac .build/luac.exe --luac-post .build/luac53.exe --version v0.1.3
 .build/lua.exe tests/test_package.lua
 .build/lua53.exe tests/test_package.lua .build/MAV-post.lua
 .build/lua-freedomtx140.exe tests/test_freedomtx140.lua .build/MAV.lua
@@ -63,7 +63,7 @@ Firmware telemetry sensors provide attitude, battery, current, satellites, link 
 | Ground speed | `GSpd` |
 | Altitude | `GAlt`, fallback `Alt` |
 
-Standard CRSF frames become firmware sensors; unhandled frames reach `crossfireTelemetryPop()`. Both foreground and background use the same bounded dispatcher. Most callbacks stop after one custom candidate; a visible idle parameter fetch may accept a second parameter candidate. Key callbacks skip parameter work to retain Navigation drawing headroom.
+Standard CRSF frames become firmware sensors; unhandled frames reach `crossfireTelemetryPop()`. Both foreground and background use the same bounded dispatcher. Most callbacks stop after one custom candidate; the visible firmware-identity screen may accept a second `0xAA` chunk. Key callbacks skip parameter work to retain Navigation drawing headroom.
 
 Status text uses command `0x80` or legacy `0x7F`, subtype `0xF1`, one severity byte, and up to 50 text bytes. Control bytes are sanitized, duplicates within three seconds increment a count, and the last 20 entries are retained.
 
@@ -75,9 +75,9 @@ CRSF `0xAC` carries big-endian uint32 `present`, `enabled`, and `health` masks. 
 
 Optional modules live under `src/SCRIPTS/MAV/` and load one chunk per foreground callback. The core checks `string.pack`, `bit32`, and CRSF transmit support before loading them. EdgeTX's native compiler path loads source with `tc`, drops the source prototype, collects, then loads the stripped cache with `b`; firmware without compiler support falls back to `tx`. Older firmware displays `Needs EdgeTX 2.11` without loading parameter modules.
 
-The browser caps the advertised parameter count at 8,192 but retains only eight decoded visible records and four fetch slots. Crossing either boundary requests the adjacent indexed window. There is no `PARAM_REQUEST_LIST`, complete local index, grouping, or parameter filesystem I/O.
+Load requests `AUTOPILOT_VERSION` and selects a packaged ArduPilot 4.6/4.7/4.8 database for Plane or Copter. Each `.pdb` uses fixed 22-byte category records and 16-byte name records; its tiny Lua manifest holds only identity, path, and category count. Category/name scrolling reads at most eight local records and sends no parameter traffic. ENTER requests only the selected exact name. Optional feature names can be unavailable on a specific vehicle.
 
-The four-read window begins at 50 ms spacing, has a 40 ms floor, and backs off up to 200 ms. RTT-derived timeouts stay between 0.6 and 2.4 seconds, with at most four attempts per index. Replies may arrive out of order; only the requested target/name/index/type is accepted.
+Only one connect, identity, exact-name read, conflict check, or verification request is pending at a time. Reads may make at most four attempts and accept only the requested target/name/type. `PARAM_SET` is transmitted once; verification uses a separate named read and an absent reply remains an unknown outcome.
 
 Editing rereads the selected value, preserves its wire type, and permits only exactly represented integers or float32 values. Save defaults to Back. Explicit Save rereads the old value to detect a concurrent change, sends SET once, then requires a separate matching readback. An armed or stale heartbeat blocks writes. A timeout after transmission is an unknown outcome and must not trigger an automatic retry.
 
@@ -89,7 +89,7 @@ The native checkout is `C:/Users/titan/Desktop/Github_Projects/ExpressLRS` on `f
 
 The TX-only library is under `src/lib/MavLuaBridge/`, with hooks in `CRSFHandset.cpp`, `MAVLink.cpp`, and `tx_main.cpp`, plus native Unity tests under `src/test/test_mavlua/`. It reuses ExpressLRS MAVLink mode's uplink and downlink paths; no RX change is required.
 
-The handset envelope is CRSF command `0xAA`, chunks byte zero, data length, then one complete MAVLink packet. Only single-chunk unsigned MAVLink is supported. Lua sends system/component 254/190. Accepted uplink messages are PING, `PARAM_REQUEST_READ`, and `PARAM_SET`; downlink forwarding is limited to HEARTBEAT and `PARAM_VALUE` with valid CRCs. A zero broadcast PING creates a ten-second local subscription and is not sent to the aircraft.
+The handset envelope is CRSF command `0xAA`, chunk marker, data length, then MAVLink packet bytes. Lua sends system/component 254/190. Accepted uplink messages are PING, `PARAM_REQUEST_READ`, `PARAM_SET`, and a strict `MAV_CMD_REQUEST_MESSAGE(AUTOPILOT_VERSION)`. Downlink forwarding is limited to unsigned HEARTBEAT, `PARAM_VALUE`, and a requested `AUTOPILOT_VERSION`; packets over 58 bytes use standard bounded chunks. A zero broadcast PING creates a ten-second local subscription and is not sent to the aircraft.
 
 The next ArduPilot component-1 heartbeat locks the system target. Writes require a disarmed heartbeat no older than three seconds. Link loss clears the bridge. Readiness monitoring requests `SYS_STATUS` at most once per second only while it is missing/stale; an active stream suppresses requests.
 
@@ -103,4 +103,4 @@ pio run -e Unified_ESP32_2400_TX_via_UART
 
 ## Next development step
 
-Add bounded background prefetch and a small neighboring-window cache. Preserve constant memory, queue ownership, callback limits, link/target invalidation, and all write safeguards. Measure radio behavior over a sustained browse soak; host speedups alone are not acceptance.
+Follow [docs/V0.2.0-ROADMAP.md](docs/V0.2.0-ROADMAP.md): make the ELRS transport firmware-agnostic, move autopilot identity and wire quirks behind radio-side adapters, and add PX4 without another bridge change. Preserve bounded state, queue ownership, callback limits, link/target invalidation, and all write safeguards.

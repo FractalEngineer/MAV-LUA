@@ -21,7 +21,7 @@ BUILD = ROOT / ".build"
 def portable_bytes(path):
     """Keep packaged source/docs identical across Windows and Linux checkouts."""
     data = path.read_bytes()
-    if path.suffix.lower() in {".lua", ".md", ".txt"} or path.name == "LICENSE":
+    if path.suffix.lower() in {".lua", ".pdb", ".md", ".txt"} or path.name == "LICENSE":
         return data.replace(b"\r\n", b"\n")
     return data
 
@@ -91,6 +91,7 @@ def package(compiler=None, compiler53=None, version="dev"):
     epoch = int(os.environ.get("SOURCE_DATE_EPOCH", time.time()))
     timestamp = time.gmtime(epoch)[:6] if "SOURCE_DATE_EPOCH" in os.environ else time.localtime(epoch)[:6]
     files = sorted((ROOT / "src").rglob("*.lua"))
+    assets = sorted((ROOT / "src").rglob("*.pdb"))
     outputs = []
     # Modern bytecode is a host validation artifact, never a third deliverable.
     if compiler53:
@@ -137,7 +138,14 @@ def package(compiler=None, compiler53=None, version="dev"):
                     info.create_system = 3
                     info.compress_type = zipfile.ZIP_DEFLATED
                     archive.writestr(info, data)
-            docs = ["README.md", "CHANGELOG.md", "LICENSE"]
+            for path in assets:
+                rel = path.relative_to(ROOT / "src").as_posix()
+                info = zipfile.ZipInfo(rel, date_time=timestamp)
+                info.create_system = 3
+                info.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(info, path.read_bytes())
+            docs = ["README.md", "CHANGELOG.md", "LICENSE", "docs/PROTOCOL.md",
+                    "docs/PARAMETER-DATABASES.md", "docs/HARDWARE-TEST.md"]
             docs += [p.relative_to(ROOT).as_posix() for p in sorted((ROOT / 'docs/images').glob('*.png'))]
             for doc in docs:
                 info = zipfile.ZipInfo(doc, date_time=timestamp)

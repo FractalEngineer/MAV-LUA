@@ -18,7 +18,8 @@ crossfireTelemetryPop = function()
   for i=1,#message do p[#p+1]=message:byte(i) end
   return 0x80, p
 end
-crossfireTelemetryPush = function() error('opening Parameters must not transmit') end
+local sent = 0
+crossfireTelemetryPush = function() sent = sent + 1 return true end
 io.seek = function() error('opening Parameters must not access cache') end
 io.open = function() return true end
 io.close = function() end
@@ -45,7 +46,9 @@ print('Navigation bytes live/peak:', memoryStats())
 app.run(40) app.run(40)
 for i=1,12 do app.run(0) collectgarbage('step', 10) end
 assert(screen:find('> LOAD <', 1, true), screen)
+assert(sent == 0, 'opening Parameters must not transmit')
 print('Parameters bytes live/peak:', memoryStats())
 app.run(42) app.run(0)
 assert(screen:find('Connecting...', 1, true), screen)
+assert(sent == 1, 'Load starts one bounded bridge subscription')
 print('Load bytes live/peak:', memoryStats())

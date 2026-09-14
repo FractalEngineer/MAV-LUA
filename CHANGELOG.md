@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.3
+
+- Replaced the hardware-rejected neighboring-window cache with Mission Planner-style first-level category browsing.
+- Added read-only ArduPilot 4.6/4.7/4.8-dev name databases for Plane and Copter. Category/name scrolling is local and retains only the current eight names.
+- Added strict firmware discovery through `AUTOPILOT_VERSION`, standard CRSF multi-chunk replies, and exact-name parameter reads. Values are requested only when selected; verified-write safeguards are unchanged.
+- Nested repeated numbered parameter groups under a common family folder, including the unnumbered base group.
+- Added wraparound at both ends of category, nested-group, and parameter-name lists.
+- Accepted ArduPilot's `param_index=-1` sentinel in exact-name `PARAM_VALUE` replies so selected values open correctly.
+- Corrected the TX bridge's named-reply match so `param_index=-1` is not mistaken for an unused indexed slot.
+
+Hardware confirmation: firmware discovery, nested categories, list wraparound, exact-name reads, editing, and verified saves were tested with Plane 4.8 on the TBS Alpha/EdgeTX 2.11 and RadioMaster Zorro ELRS setup. Browsing no longer downloads or retains the vehicle's complete parameter list.
+
 ## v0.1.2
 
 - Added a third Parameters page for EdgeTX 2.11 and newer, using a bounded eight-row live window with up to four indexed reads in flight.

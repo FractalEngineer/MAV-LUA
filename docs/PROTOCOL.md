@@ -4,7 +4,7 @@
 
 [EdgeTX's CRSF dispatcher](https://github.com/EdgeTX/edgetx/blob/main/radio/src/telemetry/crossfire.cpp) handles GPS, battery, attitude, flight mode and link statistics as firmware telemetry sensors. Unhandled frames are forwarded to the Lua telemetry queue. Reading ordinary attitude/GPS frames only through `crossfireTelemetryPop()` would therefore leave Navigation empty on normal firmware.
 
-MAV reads ten known sensor names. It pops at most eight packets per callback through one `crossfireTelemetryPop()` call site, stopping after **one custom-command candidate**, including malformed or unsupported payloads. A visible, idle Parameters download may consume a bounded second parameter candidate. Both `run()` and `background()` use that same dispatcher so collection continues while the telemetry page is hidden. Other permanent script consumers must not share that raw queue.
+MAV reads ten known sensor names. It pops at most eight packets per callback through one `crossfireTelemetryPop()` call site, stopping after **one custom-command candidate**, including malformed or unsupported payloads. Firmware identity is the only two-chunk parameter reply and may consume a bounded second `0xAA` candidate while its simple loading screen is visible. Both `run()` and `background()` use that same dispatcher so collection continues while the telemetry page is hidden. Other permanent script consumers must not share that raw queue.
 
 The custom-frame limit matters: [OpenTX's permanent-script budget](https://github.com/opentx/opentx/blob/2.3/radio/src/lua/interface.cpp) is 10,000 Lua instructions per callback. MAV reserves drawing headroom for grey fill, home navigation and proportional wrapping. Tests exercise full-length text and nine-tuple passthrough packets with full history and extreme attitude. The firmware queue is finite, so sustained traffic faster than the callback drain rate can still lose messages. There is no delivery acknowledgement or loss recovery in this status conversion.
 
@@ -32,6 +32,14 @@ The matching ELRS TX converter forwards MAVLink `SYS_STATUS` as standard CRSF fr
 `MAV_SYS_STATUS_PREARM_CHECK` is authoritative only when present. While disarmed, `READY` means the check is disabled or healthy, `NOT READY` means it is enabled and unhealthy, and `READY?` means the capability, readiness frame, or explicit arm state is absent/stale. Armed state still comes from passthrough `0x5001` and displays `ARMED`; this matters because ArduPilot reports the pre-arm bit healthy after arming. Only `READY` and `ARMED` use inverse video. Both signals expire after three seconds and clear on link loss. `STATUSTEXT` remains informational and never changes readiness.
 
 This matches Mission Planner's `connected && (health.prearm || !enabled.prearm)` rule. The matching TX bridge observes a fresh ArduPilot heartbeat and requests one-shot `SYS_STATUS` at most once per second while the message is missing or older than two seconds; an active `EXT_STAT` stream suppresses those requests. This path does not depend on opening or loading Parameters.
+
+## Parameter identity and exact reads
+
+Standard MAVLink has no category or wildcard parameter query. The v0.1.3 browser therefore packages compact Plane and Copter name databases generated from official ArduPilot 4.6, 4.7, and 4.8-dev metadata. Load first discovers an ArduPilot component-1 heartbeat, then sends a strictly formed `MAV_CMD_REQUEST_MESSAGE` for `AUTOPILOT_VERSION`. The bridge forwards that unsigned reply in standard CRSF `0xAA` chunks; the Lua decoder retains only the in-progress two-chunk packet. Vehicle type plus `flight_sw_version` major/minor selects the database. Unsupported versions or vehicle families fail before any parameter request.
+
+Each database stores fixed 22-byte top-level and optional second-level category records followed by fixed 16-byte parameter names. Repeated numbered groups are nested under their common base, so `RC`, `RC1` through `RC16` appear inside one `RC` folder. The high count bit distinguishes folders, whose offsets point to child records. The four-field Lua manifest holds identity, path, and top-level count. Opening any category page reads at most 176 bytes; opening a name page uses [EdgeTX's bounded IO API](https://luadoc.edgetx.org/2.10/part_ii_-_opentx_lua_api_programming_guide/included_lua_libraries/io-library) to seek directly to `category_offset + (row - 1) * 16` and read at most 128 bytes. All browse levels wrap at their first and last items, and scrolling does not use MAVLink. ENTER sends `PARAM_REQUEST_READ` with index `-1` and the exact selected name; ArduPilot's matching `PARAM_VALUE` also carries index `-1`, so the bridge matches its name before examining indexed reservations. Optional or board-specific names absent from the connected vehicle time out as unavailable.
+
+The TX bridge keeps one bounded named-read reservation in addition to legacy indexed-read compatibility. It forwards only a matching `PARAM_VALUE`. Write safeguards are unchanged: reread the selected name, preserve its wire type, require a fresh disarmed heartbeat, transmit one `PARAM_SET`, and require a separate matching readback. A post-transmission timeout remains an unknown outcome and is never retried automatically.
 
 ## AP state and home payloads
 
@@ -72,7 +80,7 @@ The [1.40 type names](https://github.com/tbs-fpv/freedomtx/blob/Release_V1.40/ra
 - Only visible rows and the selected entry's preview are formatted for display; no retained wrapped-line cache.
 - No queued message popups. Status history, its unread count and Navigation's latest-message line carry notifications.
 
-The Parameters page additionally retains at most eight decoded rows and four outstanding request slots. It does not retain a complete parameter list or write a parameter database to SD.
+The Parameters page retains one four-field database manifest, at most eight decoded category/name records, one selected value, and one outstanding exact-name request. Database files are read-only package assets; runtime code neither builds nor writes them. No complete live parameter list, prefetched value window, SD cache, or `params.tmp` is retained.
 
 ## Bytecode
 

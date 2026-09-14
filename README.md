@@ -7,18 +7,18 @@ MAVLink telemetry for your radio: a compact flight display, status-message viewe
 - **Navigation:** attitude indicator, flight mode, battery, link quality, satellites, altitude, and Mission Planner-style ready-to-arm status.
 - **Home guidance:** north-up direction-from-home marker and distance. The filled marker changes contrast across the horizon.
 - **Messages:** the latest 20 MAVLink status messages, with severity, repeat counts, and full-width text wrapping.
-- **Parameters:** a bounded eight-row live browser with explicit, verified writes. No parameter traffic starts until you press Load.
+- **Parameters:** Mission Planner-style first-level categories backed by compact, firmware-specific ArduPilot name databases. Browsing is local; values are read only when selected.
 - **Small-radio friendly:** native bitmap text, integer drawing, bounded memory, and both telemetry-screen and Tools entry points.
 
 | Navigation | Messages |
 | --- | --- |
 | ![Navigation preview](docs/images/navigation.png) | ![Messages preview](docs/images/messages.png) |
 
-| Browse | Edit | Review |
-| --- | --- | --- |
-| ![Parameter browser preview](docs/images/parameters-list.png) | ![Parameter editor preview](docs/images/parameters-edit.png) | ![Save review preview](docs/images/parameters-save.png) |
+| Categories | Browse | Edit | Review |
+| --- | --- | --- | --- |
+| ![Parameter categories preview](docs/images/parameters-groups.png) | ![Parameter browser preview](docs/images/parameters-list.png) | ![Parameter editor preview](docs/images/parameters-edit.png) | ![Save review preview](docs/images/parameters-save.png) |
 
-Navigation and Messages have been tested on Tango 2/FreedomTX 1.4 and TBS Alpha/EdgeTX 2.11. The v0.1.2 parameter browser and readiness path were hardware-tested on the Alpha setup described below.
+Navigation and Messages have been tested on Tango 2/FreedomTX 1.4 and TBS Alpha/EdgeTX 2.11. The v0.1.3 category-first parameter browser, exact-name reads, editing, verified saves, and readiness path were tested with ArduPilot Plane 4.8 on the Alpha setup described below.
 
 ## Installation
 
@@ -56,15 +56,21 @@ If Enter still changes pages after updating, the radio is loading an old cache. 
 
 ## Parameters
 
-Parameters require EdgeTX 2.11 or newer and the matching TX-side bridge in the [ExpressLRS fork](https://github.com/FractalEngineer/ExpressLRS/tree/feature/mavlink-lua-parameters). Stock ExpressLRS MAVLink telemetry does not expose autopilot parameter replies to handset Lua. The bridge is TX-only; it preserves normal telemetry conversion and the existing MAVLink OTA uplink.
+Parameters require EdgeTX 2.11 or newer and the matching TX-side bridge proposed in [ExpressLRS PR #3779](https://github.com/ExpressLRS/ExpressLRS/pull/3779). Stock ExpressLRS MAVLink telemetry does not expose autopilot parameter replies to handset Lua. The bridge is TX-only; it preserves normal telemetry conversion and the existing MAVLink OTA uplink.
 
-- Press **Load** to discover the vehicle and fetch the first eight indexed parameters.
-- Roll past either end to fetch the adjacent eight-row window. Up to four reads overlap with bounded retries.
-- Select a row to refresh its value before editing. Menu changes the step size.
+- Press **Load** to read `AUTOPILOT_VERSION` and select the matching vehicle/version database.
+- Browse first-level categories and parameter names locally. Each eight-name page is a direct 128-byte read from the packaged database and sends no parameter requests.
+- Repeated numbered groups are nested under one family (`RC` contains `RC`, `RC1` through `RC16`), cutting the first level roughly in half.
+- Select a name to fetch that one value. Names for disabled or board-specific features may report `Parameter unavailable`.
+- Menu changes the step size while editing.
 - Enter opens review. Choose **Save** and wait for **Saved and verified**; Exit discards the draft.
 
 Writes require a fresh disarmed heartbeat. MAV rereads the original value, sends `PARAM_SET` once, and requires a separate matching readback before reporting success. An unconfirmed write is never repeated automatically.
 
-The current browser deliberately retains only one small window. Moving between windows refetches values and can be slow; background prefetch and a bounded cache are planned for the next release. Parameter descriptions, enum labels, bitmask editors, and search are not yet included.
+v0.1.3 includes read-only Plane and Copter name databases generated from official ArduPilot 4.6, 4.7, and 4.8-dev metadata. It never downloads all live parameters or writes a runtime database. Only the current eight categories or names are retained. Parameter descriptions, enum labels, bitmask editors, search, PX4, and other autopilot families are not yet included.
+
+[Parameter database provenance](docs/PARAMETER-DATABASES.md)
+
+[v0.2.0 roadmap: firmware-agnostic bridge and radio-side firmware adapters](docs/V0.2.0-ROADMAP.md)
 
 [Changelog](CHANGELOG.md) · [Protocol notes](docs/PROTOCOL.md) · [GPL-3.0 license](LICENSE)

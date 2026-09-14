@@ -44,13 +44,19 @@ class Deliverables(unittest.TestCase):
                         else:
                             validate(data)
                             self.assertEqual(data, archive.read(rel[:-4] + '.luac'))
+                    databases = [p.relative_to(ROOT / 'src').as_posix()
+                                 for p in (ROOT / 'src/SCRIPTS/MAV/DB').glob('*.pdb')]
+                    self.assertTrue(databases)
+                    for rel in databases:
+                        self.assertEqual(archive.read(rel), (ROOT / 'src' / rel).read_bytes())
                     archive.extractall(extracted)
                 if modern:
                     stale = extracted / 'old.lua'
                     stale.write_text("error('stale cache was executed')")
                     for rel in ('SCRIPTS/TELEMETRY/MAV', 'SCRIPTS/MAV/params',
-                                'SCRIPTS/MAV/wire', 'SCRIPTS/MAV/fetch',
-                                'SCRIPTS/MAV/pview', 'SCRIPTS/MAV/pinput'):
+                                'SCRIPTS/MAV/wire', 'SCRIPTS/MAV/pview',
+                                'SCRIPTS/MAV/pdb', 'SCRIPTS/MAV/pinput',
+                                'SCRIPTS/MAV/DB/a47c'):
                         subprocess.run([str(ROOT / f'.build/luac53{suffix}'), '-s', '-o',
                                         str(extracted / (rel + '.luac')), str(stale)], check=True)
                 subprocess.run([str(runner), 'tests/test_tools.lua', extracted.as_posix()], cwd=ROOT, check=True)

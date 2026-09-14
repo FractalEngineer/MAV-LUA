@@ -17,7 +17,7 @@ class MemoryBudget(unittest.TestCase):
             subprocess.run([sys.executable, 'tools/memory_test.py'], cwd=ROOT, check=True)
         self.assertTrue(compiler.exists(), 'run tools/build53.py first')
         with tempfile.TemporaryDirectory() as cache:
-            for name in ('params', 'wire', 'fetch', 'pview', 'pinput'):
+            for name in ('params', 'wire', 'pview', 'pdb', 'pinput'):
                 subprocess.run([str(compiler), '-s', '-o', str(Path(cache) / (name + '.luac')),
                                 str(ROOT / 'src/SCRIPTS/MAV' / (name + '.lua'))], check=True)
             for history, limit in (('', 136 * 1024), ('history', 144 * 1024)):

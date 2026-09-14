@@ -538,7 +538,8 @@ local function run(event, zone)
   elseif params then params.draw(text, rightText, width, height, step)
   else
     if not parameterError then
-      if not string.pack or not bit32 or not crossfireTelemetryPush then
+      if not string.pack or not bit32 or not crossfireTelemetryPush or not io
+        or not io.open or not io.seek or not io.read or not io.close then
         parameterError = 'Needs EdgeTX 2.11'
       else
         -- Reclaim the previous chunk's parser/loader temporaries before loading

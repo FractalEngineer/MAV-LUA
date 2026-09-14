@@ -3,17 +3,16 @@ local options = arg
 arg = {'src', 'fixture'}
 local fixture = dofile('tests/test_params.lua')
 arg = options
-local f = fixture(12, 'params-preview-')
-local names = {'BATT_CAPACITY','BATT_LOW_VOLT','BATT_MONITOR','BATT_VOLT_MULT',
-  'FLTMODE1','FLTMODE2','RTL_ALTITUDE','RTL_AUTOLAND','SERVO1_FUNCTION',
-  'SERVO2_FUNCTION','TECS_CLMB_MAX','TECS_SINK_MIN'}
-f.name = function(i) return names[i+1] end
-f.values[0], f.values[1], f.values[2], f.values[3] = 5200, 14, 4, 11.1
+local f = fixture()
+f.values.AUTO_OPTIONS = 1
 local stage, width, height = arg[1], tonumber(arg[2]), tonumber(arg[3])
 if stage ~= 'parameters-load' then
   f.load()
+  if stage == 'parameters-groups' then
+    for _ = 1, 89 do f.action('next') f.tick() end
+  else f.open() end
   if stage == 'parameters-edit' or stage == 'parameters-save' then
-    f.action('next') f.edit() f.action('next')
+    f.edit() f.action('next')
     if stage == 'parameters-save' then f.action('enter') f.action('next') end
   end
 end

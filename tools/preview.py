@@ -18,7 +18,7 @@ output = ROOT / "dist" / "previews"
 output.mkdir(parents=True, exist_ok=True)
 pages = ["navigation", "messages"]
 if args.parameters:
-    pages += ["parameters-load", "parameters-list", "parameters-edit", "parameters-save"]
+    pages += ["parameters-load", "parameters-groups", "parameters-list", "parameters-edit", "parameters-save"]
 for width, height in [(128, 96), (128, 64), (212, 64)]:
     for page in pages:
         script = "tools/render_params.lua" if page.startswith("parameters-") else "tools/render.lua"
