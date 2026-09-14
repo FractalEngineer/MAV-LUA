@@ -38,6 +38,8 @@ python -m unittest discover -s tests -p "test_*.py"
 python tools/build.py --luac .build/luac.exe --luac-post .build/luac53.exe --version v0.1.3
 .build/lua.exe tests/test_package.lua
 .build/lua53.exe tests/test_package.lua .build/MAV-post.lua
+.build/lua53.exe tests/test_params.lua .build/post
+.build/lua53.exe tests/test_pipeline.lua .build/post
 .build/lua-freedomtx140.exe tests/test_freedomtx140.lua .build/MAV.lua
 ```
 

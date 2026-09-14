@@ -103,6 +103,11 @@ def package(compiler=None, compiler53=None, version="dev"):
             validate53(compiled.read_bytes())
             if rel.as_posix() == "SCRIPTS/TELEMETRY/MAV.lua":
                 (BUILD / "MAV-post.lua").write_bytes(compiled.read_bytes())
+        for path in assets:
+            rel = path.relative_to(ROOT / "src")
+            staged = BUILD / "post" / rel
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_bytes(path.read_bytes())
     for kind, target_compiler in (("source", None), ("precompiled", compiler)):
         binary = target_compiler is not None
         family = "pre" if binary else "post"
