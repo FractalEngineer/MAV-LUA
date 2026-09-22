@@ -1,8 +1,8 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- CRSF 0xAA / unsigned MAVLink 1 and 2, including bounded multi-chunk replies.
 local xor, band, shift = bit32.bxor, bit32.band, bit32.rshift
-local extras = {[0]=50, [4]=237, [20]=214, [22]=220, [23]=168, [76]=152, [148]=178}
-local lengths = {[0]=9, [4]=14, [20]=20, [22]=25, [23]=23, [76]=33, [148]=78}
+local extras = {[0]=50, [4]=237, [20]=214, [21]=159, [22]=220, [23]=168, [76]=152, [148]=178}
+local lengths = {[0]=9, [4]=14, [20]=20, [21]=2, [22]=25, [23]=23, [76]=33, [148]=78}
 local minimum = {[148]=60}
 local sequence = 0
 local chunkData, chunkNext, chunkLast
@@ -87,6 +87,11 @@ end
 local function readName(sys, comp, name)
   return encode(20, string.pack('<i2BBc16', -1, sys, comp, name))
 end
+-- Asks the autopilot to stream its own parameter list. The TX bridge must be in its bounded
+-- list session for these to be forwarded.
+local function requestList(sys, comp)
+  return encode(21, string.pack('<BB', sys, comp))
+end
 local function versionRequest(sys, comp)
   return encode(76, string.pack('<fffffffI2BBB', 148, 0, 0, 0, 0, 0, 0, 512, sys, comp, 0))
 end
@@ -103,4 +108,4 @@ local function ping()
   return result
 end
 return {decode=decode, encode=encode, parameter=parameter, read=read, readName=readName,
-  write=write, ping=ping, versionRequest=versionRequest, version=version}
+  requestList=requestList, write=write, ping=ping, versionRequest=versionRequest, version=version}

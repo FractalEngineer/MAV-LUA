@@ -117,6 +117,7 @@ def package(compiler=None, compiler53=None, version="dev"):
         with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path in files:
                 rel = path.relative_to(ROOT / "src").as_posix()
+                cache = None
                 if binary:
                     compiled = BUILD / family / rel
                     compiled.parent.mkdir(parents=True, exist_ok=True)
@@ -129,20 +130,36 @@ def package(compiler=None, compiler53=None, version="dev"):
                     print(f"{family}/{rel}: {len(data)} stripped bytes; {stats['functions']} functions; ABI verified")
                     if rel == "SCRIPTS/TELEMETRY/MAV.lua":
                         (BUILD / ("MAV.lua" if family == "pre" else "MAV-post.lua")).write_bytes(data)
+                    cache = data
                 else:
                     data = portable_bytes(path)
+                    # Ship a Lua 5.3 cache beside the readable source. Firmware compiles a module
+                    # whose cache is missing, and that compile is what exhausts the heap the first
+                    # time a pilot builds the parameter index. Worse, a module that fails to
+                    # compile is never written a cache, so that failure repeats on every retry.
+                    # This is additive: firmware still prefers newer source and still falls back to
+                    # compiling when a cache cannot be loaded, so a wrong cache degrades to today's
+                    # behaviour rather than breaking the page.
+                    if compiler53 and Path(rel).suffix == ".lua":
+                        cached = BUILD / "post" / rel
+                        if not cached.exists():
+                            cached.parent.mkdir(parents=True, exist_ok=True)
+                            subprocess.run([str(compiler53), "-s", "-o", str(cached), str(path)], check=True)
+                        cache = cached.read_bytes()
+                        validate53(cache)
                 info = zipfile.ZipInfo(rel, date_time=timestamp)
                 info.create_system = 3
                 info.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(info, data)
-                if binary:
-                    # Firmware may prefer a same-name .luac cache when present.
-                    # Replace both names so an older cache cannot shadow a fix.
+                if cache is not None:
+                    # Firmware may prefer a same-name .luac cache when present, and compares
+                    # modification times, so both names carry the same stamp. Replacing both
+                    # also means an older cache cannot shadow a fix.
                     info = zipfile.ZipInfo(str(Path(rel).with_suffix(".luac")).replace("\\", "/"),
                                            date_time=timestamp)
                     info.create_system = 3
                     info.compress_type = zipfile.ZIP_DEFLATED
-                    archive.writestr(info, data)
+                    archive.writestr(info, cache)
             for path in assets:
                 rel = path.relative_to(ROOT / "src").as_posix()
                 info = zipfile.ZipInfo(rel, date_time=timestamp)
@@ -157,6 +174,13 @@ def package(compiler=None, compiler53=None, version="dev"):
                 info.create_system = 3
                 info.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(info, portable_bytes(ROOT / doc))
+            # Card helper scripts live at src/ so they are copied to the SD card with the rest.
+            # They are archived at the package root, because on the card they sit beside SCRIPTS.
+            for helper in sorted((ROOT / 'src').glob('*.bat')):
+                info = zipfile.ZipInfo(helper.name, date_time=timestamp)
+                info.create_system = 3
+                info.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(info, portable_bytes(helper))
             info = zipfile.ZipInfo("VERSION.txt", date_time=timestamp)
             info.create_system = 3
             compatibility = "Before EdgeTX 2.11 RC1" if binary else "EdgeTX 2.11 RC1 or newer"

@@ -503,15 +503,24 @@ end
 
 local function loadParameterModule(name)
   local base = '/SCRIPTS/MAV/' .. name
-  -- Let EdgeTX compile with its own ABI and fixed 256-byte SD writer. Discard
-  -- the source prototype before loading the stripped cache, so no bytecode-sized
-  -- string or simultaneous source/binary prototypes are required in Lua heap.
-  local chunk = assert(loadScript(base .. '.lua', 'tc'))
-  chunk = nil
-  if collectgarbage then collectgarbage('collect') end
-  chunk = loadScript(base .. '.luac', 'b')
-  -- Builds without LUA_COMPILER open literal names and create no cache.
-  if not chunk then chunk = assert(loadScript(base .. '.lua', 'tx')) end
+  -- Prefer EdgeTX's compiled cache whenever one exists. Forcing compilation with 'tc'
+  -- defeats that cache and re-pays the whole compile peak on every open, which the radio
+  -- reported as "not enough memory" on an open that then succeeded when retried.
+  local chunk = loadScript(base .. '.luac', 'b')
+  if not chunk then
+    -- No cache yet, so this is a first load: let EdgeTX compile with its own ABI and write
+    -- the cache, then discard that prototype and load the stripped cache instead. Calling
+    -- the source-compiled chunk directly would work, but it carries full debug info, so the
+    -- module would hold noticeably more memory for the rest of the session.
+    local source = assert(loadScript(base .. '.lua', 'tc'))
+    source = nil
+    if collectgarbage then collectgarbage('collect') end
+    chunk = loadScript(base .. '.luac', 'b')
+    -- Builds without LUA_COMPILER open literal names and create no cache.
+    if not chunk then chunk = assert(loadScript(base .. '.lua', 'tx')) end
+  end
+  -- Assigned rather than returned directly: a zero-argument tail call falls through to
+  -- OP_RETURN on FreedomTX 1.40, turning the result into no value at all.
   local result = chunk()
   return result
 end
@@ -539,7 +548,7 @@ local function run(event, zone)
   else
     if not parameterError then
       if not string.pack or not bit32 or not crossfireTelemetryPush or not io
-        or not io.open or not io.seek or not io.read or not io.close then
+        or not io.open or not io.seek or not io.read or not io.write or not io.close then
         parameterError = 'Needs EdgeTX 2.11'
       else
         -- Reclaim the previous chunk's parser/loader temporaries before loading

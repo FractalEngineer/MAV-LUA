@@ -25,12 +25,37 @@ io.open = function() return true end
 io.close = function() end
 lcd = {clear=function() screen='' end, drawLine=function() end,
   drawText=function(_,y,s) if y<LCD_H then screen=screen..s..'\n' end end}
+-- Model EdgeTX's loader honestly so the cached and first-open paths are both covered.
+-- Both packages now ship a .luac beside each .lua, so an installed open loads bytecode. A
+-- package built without caches has none, so its first open compiles each module and the
+-- firmware then writes a cache; later opens load bytecode directly. Forcing compilation while
+-- a valid cache exists re-pays the whole compile peak, which is the regression this guards
+-- against, so it is counted and asserted rather than tolerated.
+--
+-- 'buildfirst' models the real radio sequence: the page already opened successfully, so the
+-- five opening modules are cached, but a build has never run and so its module is not. That
+-- is the case which exhausted memory on hardware before the builder's cache shipped, and it is
+-- invisible to the other modes.
+local mode = arg[5]
+local warm = mode ~= 'nocache' and mode ~= 'buildfirst'
+local written, compiles = {}, 0
+if mode == 'buildfirst' then
+  for _, name in ipairs({'wire', 'pview', 'pdb', 'pinput', 'params'}) do
+    written[name .. '.luac'] = true
+  end
+end
 loadScript = function(path, mode)
+  local name = path:match('[^/]+$')
   if path:sub(-5) == '.luac' then
-    return loadfile(cacheRoot .. '/' .. path:match('[^/]+$'))
+    if not (warm or written[name]) then return nil end
+    return loadfile(cacheRoot .. '/' .. name)
   end
   assert(path:sub(-4) == '.lua', 'module source path must be explicit')
-  assert(mode == 'tc', 'source load must request native cache compilation')
+  assert(mode == 'tc' or mode == 'tx', 'unexpected source load mode ' .. tostring(mode))
+  if mode == 'tc' then
+    compiles = compiles + 1
+    written[name:gsub('%.lua$', '.luac')] = true
+  end
   return loadfile(root .. path)
 end
 collectgarbage('collect')
@@ -52,3 +77,32 @@ app.run(42) app.run(0)
 assert(screen:find('Connecting...', 1, true), screen)
 assert(sent == 1, 'Load starts one bounded bridge subscription')
 print('Load bytes live/peak:', memoryStats())
+-- A warm open must be cache-only. Compiling while a cache exists re-pays the whole compile
+-- peak and is what made the radio report "not enough memory" on an open that then worked on
+-- retry. A first open has no cache and legitimately compiles each module once; the build-first
+-- case has the opening modules cached and must compile only the builder.
+if mode == 'buildfirst' then
+  assert(compiles == 0, 'build-first open compiled ' .. compiles .. ' already-cached module(s)')
+elseif warm then
+  assert(compiles == 0, 'warm open recompiled ' .. compiles .. ' cached module(s)')
+else
+  assert(compiles >= 5, 'first open must compile the module set once, saw ' .. compiles)
+end
+print(mode == 'buildfirst' and 'Build-first open: opening set all cached' or
+  warm and 'Warm open: loaded entirely from cache' or
+  ('First open: compiled ' .. compiles .. ' module(s)'))
+-- The index builder is loaded on demand, only when a build is requested, so its cost lands
+-- on the build path rather than on every open. This measures that incremental cost, which is
+-- the figure that matters for a radio: a build must fit alongside the already-open app.
+-- Loaded the way loadParameterModule does: prefer the cache, compile only when absent.
+if arg[4] == 'builder' then
+  local before = memoryStats(true)
+  -- Mirrors loadParameterModule: cached bytecode when present, otherwise compile once.
+  local chunk = loadScript('/SCRIPTS/MAV/index.luac', 'b')
+  if not chunk then chunk = loadScript('/SCRIPTS/MAV/index.lua', 'tc') end
+  local maker = assert(chunk)()
+  collectgarbage('collect')
+  local after = memoryStats()
+  assert(type(maker) == 'function', 'index builder module loads and returns a factory')
+  print('Builder bytes live/peak:', after, '(delta from Load:', after - before, ')')
+end

@@ -33,6 +33,10 @@ return function(s, actions)
       elseif action == 'exit' then return true end
     elseif s.state == 'connect' or s.state == 'identity' or s.state == 'database' then
       if action == 'exit' then cancel() end
+    elseif s.state == 'refresh' then
+      -- Nothing is browsable until the vehicle has been read once, and the read is done by
+      -- the standalone Tools script. Any key here just backs out.
+      if action == 'exit' or action == 'menu' or action == 'enter' then cancel() end
     elseif s.state == 'categories' then
       if action == 'exit' then
         if not database(4) then return true end
@@ -101,6 +105,7 @@ return function(s, actions)
   local function leave()
     if s.state == 'saving' then return false end
     if s.state == 'connect' or s.state == 'identity' or s.state == 'database'
+      or s.state == 'refresh'
       or s.state == 'categoryLoading' or s.state == 'groupLoading' then cancel()
     elseif s.state == 'reading' or s.state == 'checking' then
       s.pending, s.state = nil, 'list'

@@ -8,9 +8,20 @@ f.values.AUTO_OPTIONS = 1
 local stage, width, height = arg[1], tonumber(arg[2]), tonumber(arg[3])
 if stage ~= 'parameters-load' then
   f.load()
+  -- Categories are the ones this vehicle reported, so the group page is reached by name
+  -- rather than by a fixed number of scrolls.
   if stage == 'parameters-groups' then
-    for _ = 1, 89 do f.action('next') f.tick() end
-  else f.open() end
+    for _ = 1, 4 do f.action('next') f.tick() f.draw() end
+  else
+    local guard = 0
+    while not f.draw():find('@AUTO', 1, true) do
+      f.action('next')
+      f.tick()
+      guard = guard + 1
+      assert(guard < 40, 'AUTO category not reachable')
+    end
+    f.open()
+  end
   if stage == 'parameters-edit' or stage == 'parameters-save' then
     f.edit() f.action('next')
     if stage == 'parameters-save' then f.action('enter') f.action('next') end

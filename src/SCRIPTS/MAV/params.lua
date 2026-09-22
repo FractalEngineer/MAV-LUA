@@ -1,6 +1,12 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
--- Category-first ArduPilot browser. Names come from a packaged database;
--- telemetry reads only the value selected by the pilot.
+-- Vehicle-discovered ArduPilot browser. Names come from the flight controller itself: the
+-- parameter list is read once and written to a fixed-record index, which is then browsed
+-- locally. There is no offline list, so a vehicle that has never been indexed has no browsable
+-- names until a build completes.
+--
+-- The build itself is not done here. It is a separate Tools script (MAVLUA_BUILD_INDEX) because
+-- building alongside this browser exhausted the radio heap; see that file for the measurement.
+-- This page only reports that no index exists yet and asks the pilot to run that tool.
 local wire, view, database, controls, moduleLoader
 local s = {state='prompt', rows={}, selected=1, pageStart=1,
   categoryRows={}, categorySelected=1, categoryPageStart=1,
@@ -25,17 +31,21 @@ local function request(kind, name)
   s.pending = {kind=kind, name=name, tries=0}
 end
 
-local function databaseKey(vehicle, major, minor)
+-- The index is named for the identity it describes, so a firmware change simply means no
+-- index exists yet and the pilot is sent to the Tools builder. That is why no supported-version
+-- list is needed here. It lives directly in SCRIPTS/MAV, not a subfolder: EdgeTX's io has no
+-- mkdir and FatFs does not create a missing parent, so the builder could not write elsewhere.
+local function indexKey(vehicle, major, minor)
   local code, label
   if vehicle == 1 or vehicle >= 19 and vehicle <= 25 then code, label = 'p', 'Plane'
   elseif vehicle == 2 or vehicle == 3 or vehicle == 4 or vehicle == 13 or vehicle == 14
     or vehicle == 15 or vehicle == 29 then code, label = 'c', 'Copter'
   end
   if not code then return nil, 'Unsupported vehicle' end
-  if major ~= 4 or minor ~= 6 and minor ~= 7 and minor ~= 8 then
-    return nil, 'No DB: ' .. label .. ' ' .. major .. '.' .. minor
+  if major < 1 or major > 99 or minor < 0 or minor > 99 then
+    return nil, 'Unsupported firmware'
   end
-  return 'DB/a' .. major .. minor .. code, label
+  return string.format('i%02d%02d%s', major, minor, code), label
 end
 
 local function begin(now)
@@ -75,15 +85,20 @@ local function receive(frame, now)
     end
     return
   end
+  -- Streamed parameter values are only expected while the standalone Tools script is building
+  -- an index, which runs in its own state with this page paused. Anything that arrives here is
+  -- an unrequested reply, so only a value matching an outstanding request is used.
   if source ~= s.sys or component ~= s.comp or not s.pending or not s.pending.sent then return end
   if id == 148 and s.pending.kind == 'version' then
     local major, minor, patch = wire.version(payload)
-    local key, label = databaseKey(s.vehicle, major, minor)
+    local key, label = indexKey(s.vehicle, major, minor)
     s.pending = nil
     if not key then failure(label) return end
     s.dbkey, s.vehicleName = key, label
     s.dbVersion = major .. '.' .. minor
     s.firmware = label .. ' ' .. major .. '.' .. minor .. '.' .. patch
+    -- The index filename carries the identity, so its presence decides whether this
+    -- vehicle can be browsed or must first be read.
     s.state = 'database'
     return
   end
@@ -138,12 +153,21 @@ local function tick(now, linked, visible)
       or result[2] ~= s.vehicleName or type(result[3]) ~= 'string'
       or type(result[4]) ~= 'number'
       or result[4] < 1 then
-      failure('Database unavailable')
+      -- No index for this identity yet. The pilot must build one; there is no packaged
+      -- fallback, so nothing is browsable until the vehicle has been read. Loading the
+      -- build session is deferred to the moment a build is requested.
+      s.state = 'refresh'
     else
       s.database, s.categoryTotal, s.categoryIndexOffset = result, result[4], 0
       s.folderName = nil
       database(2, 1, false)
     end
+    return
+  elseif s.state == 'refresh' then
+    -- The index is built by the standalone Tools script, not here. Building it in this page
+    -- needs the browser modules and the builder resident at once, which measured about
+    -- 128 KiB and exhausted the radio heap. The tool loads only the wire codec and the
+    -- builder in its own Lua state, about 80 KiB, so this page only points at it.
     return
   elseif s.state == 'categoryLoading' then
     database(6)
@@ -191,11 +215,17 @@ local function leave()
   local result = controls.leave()
   return result
 end
-local function draw(text, right, width, height, step) view(s, text, right, width, height, step) end
+local function draw(text, right, width, height, step)
+  view(s, text, right, width, height, step)
+end
 local function editing() return s.state == 'edit' end
-local function loading() return s.state == 'identity' end
+local function loading()
+  return s.state == 'identity'
+end
 
--- Load one small chunk per foreground callback, after the previous loader returns.
+-- Load one small chunk per foreground callback, after the previous loader returns. The index
+-- builder is not loaded at all: it belongs to the standalone Tools script, so opening this
+-- page never pays for the builder's code, its screen text or its working buffer.
 local function init(load)
   moduleLoader = load
   if not wire then wire = load('wire')

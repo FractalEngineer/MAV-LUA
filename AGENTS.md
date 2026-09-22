@@ -1,8 +1,8 @@
 # MAV-LUA development guide
 
-## Latest handoff — 2026-09-15
+## Latest handoff — 2026-09-21
 
-Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.3 is the hardware-confirmed baseline for Navigation, Messages, ready-to-arm status, and category-first ArduPilot parameter browsing. The next feature line is the firmware-agnostic transport and radio-side adapter work in [docs/V0.2.0-ROADMAP.md](docs/V0.2.0-ROADMAP.md).
+Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.3 is the hardware-confirmed baseline for Navigation, Messages, ready-to-arm status, and category-first ArduPilot parameter browsing. The next feature line replaces packaged-database browsing with a vehicle-discovered parameter index; see [docs/V0.2.0-ROADMAP.md](docs/V0.2.0-ROADMAP.md).
 
 ## Working agreement
 
@@ -11,7 +11,10 @@ Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.3 is the hardware-confirme
 - Use one telemetry queue consumer. Parameter code receives packets from the core dispatcher and must not pop the CRSF queue itself.
 - Parameter traffic is opt-in. Never write on scroll or during editing. Require explicit Save and matching autopilot readback before reporting success.
 - Do not equate CRSF device parameters with autopilot parameters. Stock ExpressLRS telemetry does not expose a raw autopilot parameter stream to handset Lua.
-- Keep parameter state bounded. Do not restore the full live-list download, runtime SD database writes, or `params.tmp`; those designs failed on radio. Packaged immutable `.pdb` name assets are intentional.
+- Parameter names come from the connected vehicle, not a packaged list. There is no offline or pre-populated browsing: a name is only usable once it has actually been read from the flight controller. Do not reintroduce packaged `.pdb` name assets as the browse source.
+- Keep the discovered index bounded and built in one deliberate pass. Do not restore the naive full live-list download with per-record SD writes or a `params.tmp` scratch file; those designs failed on radio. Building a fixed-record index in bounded runs, then browsing it by seek, is the intended replacement. The index is written **directly into `SCRIPTS/MAV/`** as `i<major><minor><plane|copter>.pdb`: EdgeTX's `io` library exposes only open/close/read/write/seek, so there is no `mkdir`, and FatFs will not create a missing parent, which means the builder can only write into a folder the package already ships. Never move the index back into a subdirectory.
+- **Never use the `table` library, `os`, `debug`, `package`, `coroutine` or `utf8` in radio-side code.** EdgeTX registers `table` only inside `#if defined(COLORLCD)` in its `linit.c`, so on a monochrome radio `table` is `nil` and any call raises `attempt to index a nil value (global 'table')`. Host Lua always provides every library, so a desktop test that simply runs a module cannot detect this. `index.lua` implements its own merge sort and join for exactly this reason, and `tests/test_index_sandbox.lua` runs a real build with `table` removed so the dependency cannot return.
+- **Never build a large string by concatenating in a loop.** Repeated `..` allocates every intermediate result, and Lua collects incrementally with a debt threshold that scales with live memory, so the garbage piles up instead of being reclaimed promptly. One run of 64 padded names cost about 33 KiB of garbage for a 1 KiB payload and drove a 509 KiB peak at 700 names, which is what made the build fail and freeze the radio. Write fixed-size records to the open file one at a time, in bounded batches, as the run and merge phases do. Note the diagnostics differ: `..` raises plain `not enough memory`, while `string.rep`, `string.gsub` expansion and `io.read('*a')` grow a `luaL_Buffer` and raise `not enough memory for buffer allocation` — so that second message points at those calls, not at concatenation. A capped-allocator test cannot catch the accumulation, because a tight limit drives the collector continuously and masks it; `tests/test_index_writes.lua` asserts the write shape instead.
 - Preserve LICENSE/SPDX and desktop font notices.
 - Never rewrite a release tag. New releases ship exactly two ZIPs plus `SHA256SUMS.txt`; historical assets remain unchanged.
 
@@ -21,7 +24,7 @@ The v0.1.3 parameter browser and readiness path are confirmed with ArduPilot Pla
 
 EdgeTX 2.11 RC1 changed from Lua 5.2 to Lua 5.3 and uses int32/float32. Decode disjoint packed byte fields directly; assembling uint32 values can overflow integers or discard low float bits. Modern-only modules must remain lazily loaded after capability checks so the core still parses on Lua 5.2.
 
-The legacy binary format uses number/string tags 5/6 and size32/double64. The modern host-validation format uses standard tags and size32/int32/float32. Lua 5.3 bytecode is an internal validation artifact, not a radio deliverable.
+The legacy binary format uses number/string tags 5/6 and size32/double64. The modern host-validation format uses standard tags and size32/int32/float32. The `_source` package ships a Lua 5.3 `.luac` cache beside each readable `.lua`, and `build.py` validates every cache before packaging it. This is deliberate: firmware compiles a module whose cache is missing, that compile is what exhausts the heap on a first index build, and a module that fails to compile is never written a cache, so the failure would repeat on every retry. Shipping the cache is additive only — firmware still compares timestamps, prefers newer source, and falls back to compiling when a cache cannot be loaded, so a wrong or stale cache degrades to a compile instead of breaking a page.
 
 ## Build, test, and release
 
@@ -43,7 +46,7 @@ python tools/build.py --luac .build/luac.exe --luac-post .build/luac53.exe --ver
 .build/lua-freedomtx140.exe tests/test_freedomtx140.lua .build/MAV.lua
 ```
 
-Use `--archive` to bootstrap from an existing pinned Lua tarball. Output goes under `dist/<version>/`. `_source` targets EdgeTX 2.11 RC1 and newer; `_precompiled` targets earlier firmware and includes discovery `.lua`, cache `.luac`, and readable source under `SOURCE/`. Remove old caches before installing source.
+Use `--archive` to bootstrap from an existing pinned Lua tarball. Output goes under `dist/<version>/`. `_source` targets EdgeTX 2.11 RC1 and newer and ships readable `.lua` plus a matching `.luac` cache for each; `_precompiled` targets earlier firmware and includes discovery `.lua`, cache `.luac`, and readable source under `SOURCE/`. Because both packages now carry caches, leave no older cache behind when installing, or firmware will prefer whichever file is newer.
 
 For a release: run all checks, regenerate previews, copy the two ZIPs and checksums to `releases/<tag>/`, commit, create an annotated tag with its changelog, push commit and tag atomically, then publish those three assets. The tag workflow independently rebuilds the same deliverable set.
 
@@ -77,9 +80,13 @@ CRSF `0xAC` carries big-endian uint32 `present`, `enabled`, and `health` masks. 
 
 Optional modules live under `src/SCRIPTS/MAV/` and load one chunk per foreground callback. The core checks `string.pack`, `bit32`, and CRSF transmit support before loading them. EdgeTX's native compiler path loads source with `tc`, drops the source prototype, collects, then loads the stripped cache with `b`; firmware without compiler support falls back to `tx`. Older firmware displays `Needs EdgeTX 2.11` without loading parameter modules.
 
-Load requests `AUTOPILOT_VERSION` and selects a packaged ArduPilot 4.6/4.7/4.8 database for Plane or Copter. Each `.pdb` uses fixed 22-byte category records and 16-byte name records; its tiny Lua manifest holds only identity, path, and category count. Category/name scrolling reads at most eight local records and sends no parameter traffic. ENTER requests only the selected exact name. Optional feature names can be unavailable on a specific vehicle.
+Names are discovered from the vehicle. The index is built by the standalone Tools script `SCRIPTS/TOOLS/MAVLUA_BUILD_INDEX.lua`, which reads `AUTOPILOT_VERSION` for identity and then has `PARAM_REQUEST_LIST` stream the vehicle's own parameters. It writes a fixed-record index on SD in bounded runs; the Parameters page then browses that index, reading at most eight local records and sending no parameter traffic. ENTER requests only the selected exact name. Because the index is vehicle-derived, there are no optional or board-specific names to be unavailable: every listed name exists on that vehicle as of the last build. A vehicle that has never been indexed has no browsable names, and the page only says so and points at the tool.
 
-Only one connect, identity, exact-name read, conflict check, or verification request is pending at a time. Reads may make at most four attempts and accept only the requested target/name/type. `PARAM_SET` is transmitted once; verification uses a separate named read and an absent reply remains an unknown outcome.
+**The build must not move back into the Parameters page.** Measured against the allocator cap, building in-page needs about 128 KiB because the browser modules are already resident, while the tool needs about 80 KiB at worst: a tool runs in its own Lua state with the permanent scripts paused, it does not load the browser at all, and it is not subject to the permanent-script instruction budget. That budget is the only reason the builder had to be stepwise. The tool and the page must agree on the identity-derived index filename; keep that one rule shared.
+
+The identity reply or the streamed values decide the index identity. Adding PX4 identity and codec handling must not require another ExpressLRS bridge change; firmware-specific decoding stays behind the radio-side adapter.
+
+Only one connect, identity, list build, exact-name read, conflict check, or verification request is pending at a time. Reads may make at most four attempts and accept only the requested target/name/type. `PARAM_SET` is transmitted once; verification uses a separate named read and an absent reply remains an unknown outcome.
 
 Editing rereads the selected value, preserves its wire type, and permits only exactly represented integers or float32 values. Save defaults to Back. Explicit Save rereads the old value to detect a concurrent change, sends SET once, then requires a separate matching readback. An armed or stale heartbeat blocks writes. A timeout after transmission is an unknown outcome and must not trigger an automatic retry.
 
@@ -89,9 +96,11 @@ PAGE cycles Navigation, Messages, and Parameters. ENTER selects; EXIT backs out;
 
 The native checkout is `C:/Users/titan/Desktop/Github_Projects/ExpressLRS` on `feature/mavlink-lua-parameters`, based on upstream `a60b68af`. `origin` is ExpressLRS/ExpressLRS and `myfork` is FractalEngineer/ExpressLRS. Preserve `src/user_defines.txt`; it contains private user build settings and must never be staged or printed.
 
-The TX-only library is under `src/lib/MavLuaBridge/`, with hooks in `CRSFHandset.cpp`, `MAVLink.cpp`, and `tx_main.cpp`, plus native Unity tests under `src/test/test_mavlua/`. It reuses ExpressLRS MAVLink mode's uplink and downlink paths; no RX change is required.
+The TX-only library is under `src/lib/MavLuaBridge/`, with hooks in `TXModuleEndpoint.cpp`, `MAVLink.cpp`, and `tx_main.cpp`, plus native Unity tests under `src/test/test_mavlua/`. It reuses ExpressLRS MAVLink mode's uplink and downlink paths; no RX change is required.
 
-The handset envelope is CRSF command `0xAA`, chunk marker, data length, then MAVLink packet bytes. Lua sends system/component 254/190. Accepted uplink messages are PING, `PARAM_REQUEST_READ`, `PARAM_SET`, and a strict `MAV_CMD_REQUEST_MESSAGE(AUTOPILOT_VERSION)`. Downlink forwarding is limited to unsigned HEARTBEAT, `PARAM_VALUE`, and a requested `AUTOPILOT_VERSION`; packets over 58 bytes use standard bounded chunks. A zero broadcast PING creates a ten-second local subscription and is not sent to the aircraft.
+The handset envelope is CRSF command `0xAA`, chunk marker, data length, then MAVLink packet bytes. Because those bytes are not CRSF addresses, the TX module claims the frame type in `TXModuleEndpoint::handleRaw` and consumes it exclusively before the router can interpret them. Lua sends system/component 254/190. Accepted uplink messages are PING, `PARAM_REQUEST_READ`, `PARAM_SET`, and a strict `MAV_CMD_REQUEST_MESSAGE(AUTOPILOT_VERSION)`. Downlink forwarding is limited to unsigned HEARTBEAT, `PARAM_VALUE`, and a requested `AUTOPILOT_VERSION`; packets over 58 bytes use standard bounded chunks. A zero broadcast PING creates a ten-second local subscription and is not sent to the aircraft.
+
+Building the vehicle-discovered index requires the bridge to accept `PARAM_REQUEST_LIST` and to forward streamed `PARAM_VALUE` without a per-index reservation while a bounded list session is open. Keep that session hard-capped by time and packet count, lease-gated, and mutually exclusive with normal reads so the one-reply-per-reservation guarantee is never weakened.
 
 The next ArduPilot component-1 heartbeat locks the system target. Writes require a disarmed heartbeat no older than three seconds. Link loss clears the bridge. Readiness monitoring requests `SYS_STATUS` at most once per second only while it is missing/stale; an active stream suppresses requests.
 
@@ -103,6 +112,8 @@ $env:ELRS_UNIFIED_CONFIG='radiomaster.tx_2400.zorro'
 pio run -e Unified_ESP32_2400_TX_via_UART
 ```
 
+**After any change to `src/lib/MavLuaBridge/MavLuaBridge.h`, reflash the module and confirm the firmware is newer than that header.** The bridge gained `PARAM_REQUEST_LIST` support after the first bridge version, so a module built before it silently drops the list request: an index build then reports `0 names` while identity still succeeds, because the identity path is older. That asymmetry has already been misread as a code bug once. A stale flash and a broken builder look identical from the handset, so check the timestamps before debugging Lua.
+
 ## Next development step
 
-Follow [docs/V0.2.0-ROADMAP.md](docs/V0.2.0-ROADMAP.md): make the ELRS transport firmware-agnostic, move autopilot identity and wire quirks behind radio-side adapters, and add PX4 without another bridge change. Preserve bounded state, queue ownership, callback limits, link/target invalidation, and all write safeguards.
+Follow [docs/V0.2.0-ROADMAP.md](docs/V0.2.0-ROADMAP.md): replace packaged-database browsing with a vehicle-discovered index, keep the ExpressLRS transport firmware-agnostic, and move autopilot identity and wire quirks behind radio-side adapters so PX4 needs no bridge change. Preserve bounded state, queue ownership, callback limits, link/target invalidation, and all write safeguards.

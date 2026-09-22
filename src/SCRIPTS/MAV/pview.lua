@@ -28,17 +28,24 @@ return function(s, text, right, width, height, step)
     row(5, 'EXIT: cancel')
   elseif s.state == 'identity' then
     row(2, 'Reading firmware...')
-    row(3, 'Selecting database')
+    row(3, 'Checking for an index')
     row(5, 'EXIT: cancel')
+  elseif s.state == 'refresh' then
+    -- Static text only. The build itself is a separate Tools script, so nothing here has to
+    -- load the builder or hold a working buffer.
+    row(2, 'No parameter index')
+    row(3, 'for this firmware yet')
+    row(5, 'Run Tools > MAV Index')
+    row(6, 'EXIT: back', true)
   elseif s.state == 'database' then
     row(2, 'Opening database...')
     row(3, s.firmware or '')
   elseif s.state == 'categoryLoading' then
     row(2, 'Opening categories...')
-    row(3, 'Local SD database')
+    row(3, (s.built or 0) .. ' names read')
   elseif s.state == 'groupLoading' then
     row(2, 'Opening ' .. (s.groupName or '') .. '...')
-    row(3, 'Local SD database')
+    row(3, (s.built or 0) .. ' names read')
     row(5, 'EXIT: categories')
   elseif s.state == 'categories' then
     row(1, s.folderName and (s.folderName .. ' groups')

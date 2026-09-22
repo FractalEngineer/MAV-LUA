@@ -1,4 +1,9 @@
--- Category browsing is local; selected-name traffic retains bounded retries.
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Local paging cost and bounded exact-read retries.
+--
+-- The index is built from the vehicle, so this test builds one large group from a synthetic
+-- parameter stream, then proves paging it locally costs no vehicle traffic and stays inside
+-- the permanent-script callback budget.
 local root = arg[1] or 'src'
 local saved = arg
 arg = {root, 'fixture'}
@@ -13,15 +18,28 @@ local function waitFor(f, text, limit)
   error('timeout waiting for ' .. text .. ':\n' .. f.draw())
 end
 
-local f = fixture()
+-- One 201-name group, plus a small category so the first page is not the large group.
+local stream = {'AUTO_OPTIONS', 'ZIGZ'}
+for i = 1, 201 do stream[#stream + 1] = string.format('BIGP_%03d', i) end
+
+-- Opens a named top-level category, however many pages of categories precede it.
+local function openCategory(f, name)
+  local guard = 0
+  while not f.draw():find('@' .. name, 1, true) do
+    f.action('next')
+    f.tick()
+    guard = guard + 1
+    assert(guard < 60, 'category ' .. name .. ' not reachable')
+  end
+  f.open()
+end
+
+local f = fixture({stream = stream})
 f.interval = 2
-f.action('enter')
-waitFor(f, 'parameter names')
-local identityTraffic = f.sent
-for _ = 1, 79 do f.action('next') f.tick() end
-f.action('enter') waitFor(f, 'OSD groups')
-f.action('next') -- OSD1, 201 local names.
-f.open()
+f.load()
+openCategory(f, 'BIGP')
+-- Page the whole group locally, measuring every callback. Exactly 200 presses lands on the
+-- final row: the list wraps, so a longer loop would cycle back to the start.
 local maximum = 0
 for _ = 1, 200 do
   local instructions = 0
@@ -32,13 +50,14 @@ for _ = 1, 200 do
   maximum = math.max(maximum, instructions)
 end
 assert(f.draw():find('201/201', 1, true), f.draw())
-assert(#f.reads == 0, 'scrolling 200 OSD1 names must not request an autopilot parameter')
+assert(#f.reads == 0, 'scrolling 201 names must not request an autopilot parameter')
 assert(maximum < 10000, 'local page crossing exceeds callback budget: ' .. maximum)
 
--- Queue backpressure consumes a bounded attempt and then recovers without
--- changing the selected exact name.
+-- Queue backpressure consumes a bounded attempt and then recovers without changing the
+-- selected exact name.
 f = fixture()
-f.load() f.open()
+f.load()
+openCategory(f, 'AUTO')
 f.busy = true
 f.action('enter')
 for _ = 1, 26 do f.tick() end
@@ -49,7 +68,8 @@ assert(#f.reads == 1 and f.reads[1] == 'AUTO_OPTIONS', 'retry keeps exact select
 
 -- Accepted reads stop after four missing replies and stay read-only.
 f = fixture()
-f.load() f.open()
+f.load()
+openCategory(f, 'AUTO')
 f.drop = true
 local before = f.sent
 f.action('enter')
@@ -57,4 +77,4 @@ waitFor(f, 'Parameter unavailable', 700)
 assert(#f.reads == 4 and f.sent - before >= 4 and f.sets == 0,
   'missing exact read has four bounded attempts and no SET')
 
-print(string.format('PASS: 200-name OSD1 local browse, max ~%d instructions; exact-read retry/backpressure', maximum))
+print(string.format('PASS: 201-name group browse, max ~%d instructions; exact-read retry/backpressure', maximum))
