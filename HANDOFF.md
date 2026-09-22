@@ -8,32 +8,89 @@ The neighboring-window prefetch/cache was hardware-tested and rejected: the TBS 
 
 The tiny database manifests retain only firmware/vehicle identity, path, and top-level category count. Fixed 22-byte category records and 16-byte names are paged directly from `.pdb`; repeated numbered groups such as RC/RC1..RC16 are nested under one bounded second-level folder. All browse levels wrap at their first and last items. Runtime state retains only the current eight categories or names. It never downloads the full live list and never writes parameter data to SD. The databases are generated from official ArduPilot metadata. ArduPilot exact-name replies use `param_index=-1`; both Lua and the TX bridge accept that sentinel instead of treating it as an out-of-range or empty indexed slot. Host tests cover complete 201-name OSD1 scrolling with no parameter requests, firmware selection, direct page reads, named-read retries, and write safeguards. Firmware discovery, nested browsing, wraparound, reads, editing, and verified saves were accepted on hardware with Plane 4.8.
 
-## Failed attempt: the vehicle-discovered index
+## Shelved: the vehicle-discovered index
 
-A later attempt replaced the packaged databases with an index built on the radio from the vehicle's own streamed parameter list. **It failed on hardware and was reverted.** It is preserved on the `self-building-index` branch for reference. Do not merge it as-is.
+Two attempts replaced the packaged databases with an index built on the radio from the vehicle's own
+streamed parameter list. **Both failed on hardware and the line is shelved.** The work is preserved
+on the `self-building-index` branch for reference; do not merge it as-is. **Packaged `.pdb` browsing
+is the browse source again** — it works on hardware today, and it is what ships.
 
-The failure: the build reports `not enough memory for buffer allocation` from around 700 names found, and the radio sometimes freezes at the same point. The builder cannot complete inside the radio heap.
+The second attempt got much further and still could not finish a build at about **739 names found**.
 
-What was tried, and what each did not achieve:
+### What the radio actually has
 
-- Building in the Parameters page needed about 128 KiB with the browser resident, which exhausted the heap on every retry.
-- Moving the build into `SCRIPTS/TOOLS/MAVLUA_BUILD_INDEX.lua` reached the build. A Tools script gets its own Lua state with the permanent scripts paused and is not subject to the instruction budget, but the build still exhausted the heap while running.
-- Removing the `table` library dependency (a Lua merge sort and join) fixed a real crash — `table` is `nil` on a monochrome radio — without fixing the memory use.
-- Removing per-record `string.rep` padding and eliminating a looped `..` concatenation in the run phase reduced the peak the host measured from 509 KiB to 197 KiB at 700 names, and changed nothing on the radio.
-- Writing records individually in bounded batches, and re-sending the list request until a name arrived (which fixed a first-attempt failure), were both correct changes on their own terms. Neither made the build fit.
+This is the part worth keeping, because it is measured rather than inferred.
+`tools/diag/MAVHEAP.lua` measures the Lua heap on the device directly, appending each result to
+`/MAVHEAP.TXT` as it is taken so a stall still leaves the answer. Three runs gave:
 
-Two conclusions worth keeping:
+| Configuration | Modules loaded | Used | Obtainable | Largest contiguous |
+| --- | --- | --- | --- | --- |
+| `bare` | none | 13.4 KiB | 56 KiB | 22.9 KiB |
+| `build` | wire + index | 38.2 KiB | **30 KiB** | 16.0 KiB |
+| `full` | all modules | 58.6 KiB | 9 KiB | 5.3 KiB |
 
-- **The host memory harness is not a trustworthy predictor for this path.** It runs under a capped allocator, and forcing collection at a tight cap hides accumulated garbage, so it reported improvements that hardware did not confirm. Host peak figures for a build of this kind should be treated as indicative only, and never as evidence a radio path is fixed.
-- **Adding safeguards to a failing build did not converge.** The build failed across many iterations with a different symptom each time. Any future attempt should establish that the whole build fits the radio heap *before* adding features on top of it, rather than discovering the ceiling mid-implementation.
+A Tools state therefore has about **68 KiB** of Lua heap, and a build's whole budget for staging
+tables, sort runs and file buffers is about **30 KiB**. Two runs were identical and a third differed
+by 7–9 KiB, so treat any budget as having that much uncertainty.
 
-Kept from this work: `src/uninstall-mav-lua.bat`, which removes every MAV-LUA file from the card it is run from and is useful regardless of how the index is eventually built.
+Three conclusions that outlive the attempt:
+
+- **The limit is total size, not fragmentation.** A 16 KiB largest contiguous block is ample for the
+  ~1 KiB blocks a builder uses, so `luaL_Buffer` behaviour is not the constraint.
+- **The application core cannot load inside a Tools state.** It needs more than the 9 KiB left in the
+  `full` configuration, so moving the editor into a Tool could not have worked either.
+- **Reducing a measured number was not enough.** A lean rewrite cut resident header-phase staging by
+  26% on the host, 47.1 → 34.9 KiB, and still did not fit. That points at the design rather than at a
+  table or two: the external merge sort exists only to produce one globally alphabetical name file,
+  so peak memory scales with the vehicle. Ordering by category-then-name instead would remove the
+  sort and the merge entirely and keep memory O(page).
+
+### What was tried, and what each attempt achieved
+
+- Building in the Parameters page needed about 128 KiB with the browser resident, so it exhausted the
+  heap on every retry.
+- Moving the build into `SCRIPTS/TOOLS/MAVLUA_BUILD_INDEX.lua` reached the build. A Tools script gets
+  its own Lua state and is exempt from the permanent-script instruction budget, but **not more
+  memory**: EdgeTX's `custom_l_alloc` draws every state from one pool.
+- Removing the `table` dependency fixed a genuine crash, since `table` is `nil` on a monochrome radio,
+  and changed nothing about memory.
+- Removing per-record `string.rep` padding and a looped `..` concatenation in the run phase cut the
+  host-measured peak from 509 to 197 KiB and changed nothing on the radio.
+- Re-sending the list request until a name arrived fixed a real first-attempt failure.
+- Replacing six label-keyed staging tables and a duplicated label list with integer-indexed arrays and
+  a permutation was the only change that attacked the measured constraint. Labels were verified
+  contiguous in the sorted file, 23 labels producing 23 runs and 0 splits, including RC/RC1..RC12.
+  It still did not fit.
+
+### Lessons
+
+- **The host memory harness is not a trustworthy predictor for this path.** It runs under a capped
+  allocator, and forcing collection at a tight cap hides accumulated garbage, so it reported
+  improvements hardware never confirmed. Several iterations looked like convergence for that reason.
+- **Adding safeguards to a build that does not fit did not converge.** Every change reduced a measured
+  number and none changed the outcome. A future attempt should establish the fit *before* building
+  features on it.
+- **On every pass the measuring instrument needed fixing before the subject did.** The host harness
+  masked garbage; the probe used `path:find`, which EdgeTX does not support because strings have no
+  metatable; a test harness accumulated drawn strings and faked a 32 KiB leak; a staging measurement
+  double-divided its units. Each was caught by testing the instrument rather than trusting it.
+
+Kept from this work: `src/uninstall-mav-lua.bat`, `tools/diag/MAVHEAP.lua` with
+`tests/test_heap_probe.lua`, and `tests/test_radio_libs.lua`.
 
 ## Next priority
 
-Two directions are open. The immediate one is to reconsider how parameter names are obtained at all, since both the packaged-database approach and the on-radio build now have hardware evidence against them. The other is the [v0.2.0 roadmap](docs/V0.2.0-ROADMAP.md): keep ExpressLRS as a generic, bounded MAVLink transport and move firmware identity, database selection, reply correlation, and wire conversion behind MAV-LUA adapters, so PX4 can be added later without another ExpressLRS bridge change.
+The [v0.2.0 roadmap](docs/V0.2.0-ROADMAP.md) is still the sound direction, and it does **not** depend
+on how names are obtained: keep ExpressLRS a generic, bounded MAVLink transport, and move firmware
+identity, database selection, reply correlation, and wire conversion behind MAV-LUA adapters so PX4
+needs no further bridge change.
 
-Do not reintroduce the abandoned full live-list download, `params.tmp`, or runtime database writes. Those approaches caused radio freezes and allocation failures. The packaged `.pdb` files are immutable installation assets with fixed 16-byte name records, not a downloaded cache. If the index idea is revisited, note that the ExpressLRS bridge change it needs is a bounded list session accepting `PARAM_REQUEST_LIST`; that bridge work is separable from the builder and was validated with native tests, but it is upstream-neutral and ships on its own branch.
+Avoid the abandoned full live-list download, `params.tmp`, and runtime database writes; those caused
+radio freezes and allocation failures. The packaged `.pdb` files are immutable installation assets
+with fixed 16-byte name records, not a downloaded cache. If the index is ever revisited, start from
+the measured 30 KiB build budget, prefer an O(page) design, and confirm the fit with
+`tools/diag/MAVHEAP.lua` before implementing. The ExpressLRS list session such a design needs exists
+on `feature/mavlink-lua-parameter-list`, but nothing consumes it.
 
 ## Safety and protocol contracts
 

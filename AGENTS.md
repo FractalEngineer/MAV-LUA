@@ -2,9 +2,11 @@
 
 ## Latest handoff — 2026-09-22
 
-Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.3 is the hardware-confirmed baseline for Navigation, Messages, ready-to-arm status, and category-first ArduPilot parameter browsing.
+Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.3 is the hardware-confirmed baseline for Navigation, Messages, ready-to-arm status, and category-first ArduPilot parameter browsing. **Packaged `.pdb` browsing is the browse source**, and that is settled for now.
 
-A vehicle-discovered parameter index was attempted and **failed on hardware**: the build reports `not enough memory for buffer allocation` from around 700 names and sometimes freezes the radio. It is preserved on the `self-building-index` branch and must not be merged as-is. Do not rebuild the index on the radio without first establishing that a whole build fits the radio heap. The next feature line is the firmware-agnostic transport and radio-side adapter work in [docs/V0.2.0-ROADMAP.md](docs/V0.2.0-ROADMAP.md).
+A vehicle-discovered parameter index was attempted **twice and failed on hardware both times**; the second attempt reached about 739 names before running out of heap. The line is shelved and preserved on the `self-building-index` branch; do not merge it as-is.
+
+The radio has since been measured directly, and the numbers are the most valuable thing to come out of the work. A Tools state has about **68 KiB** of Lua heap, and a build's entire budget is about **30 KiB**. The limit is total size rather than fragmentation, and the application core cannot load inside a Tools state at all. `tools/diag/MAVHEAP.lua` produces these figures; use it **before** designing anything that must fit a radio budget. The next feature line is the firmware-agnostic transport and radio-side adapter work in [docs/V0.2.0-ROADMAP.md](docs/V0.2.0-ROADMAP.md).
 
 ## Working agreement
 
@@ -14,8 +16,10 @@ A vehicle-discovered parameter index was attempted and **failed on hardware**: t
 - Parameter traffic is opt-in. Never write on scroll or during editing. Require explicit Save and matching autopilot readback before reporting success.
 - Do not equate CRSF device parameters with autopilot parameters. Stock ExpressLRS telemetry does not expose a raw autopilot parameter stream to handset Lua.
 - Keep parameter state bounded. Do not restore the full live-list download, runtime SD database writes, or `params.tmp`; those designs failed on radio. Packaged immutable `.pdb` name assets are intentional.
-- **Do not treat the host memory harness as evidence that a radio memory path is fixed.** It runs under a capped allocator, and forcing collection at a tight cap hides accumulated garbage, so it reports improvements that hardware does not confirm. A change to radio memory behaviour needs radio evidence. This is what made one failed attempt look like progress for many iterations.
-- `uninstall-mav-lua.bat` lives in `src/` so it ships to the card root beside `SCRIPTS`, and removes every MAV-LUA file from the card it is run from. Keep it in step with the shipped file list whenever files are added or removed.
+- **Do not treat the host memory harness as evidence that a radio memory path is fixed.** It runs under a capped allocator, and forcing collection at a tight cap hides accumulated garbage, so it reports improvements that hardware does not confirm. Several iterations of a failed attempt looked like convergence for that reason. Radio memory claims need radio evidence from `tools/diag/MAVHEAP.lua`.
+- **Establish that a whole operation fits the budget before building features on it.** Adding safeguards to a build that did not fit never converged: every change reduced a measured number and none changed the outcome.
+- **Never use colon-method syntax on radio-side values.** EdgeTX gives strings no metatable `__index`, so `s:find(...)` raises `attempt to index a string value` on the radio while working perfectly on the desktop. Every shipped module calls the library form, `string.find(s, ...)`, and none contains a colon call. `tests/test_radio_libs.lua` rejects them, in addition to missing libraries, because the missing-library check cannot see a colon call: its callee is a variable, not a library.
+- `uninstall-mav-lua.bat` lives in `src/` so it ships to the card root beside `SCRIPTS`, and removes every MAV-LUA file from the card it is run from. Keep it in step with the shipped file list whenever files are added or removed. Old `.luac` caches are the usual reason an update appears to do nothing.
 - Preserve LICENSE/SPDX and desktop font notices.
 - Never rewrite a release tag. New releases ship exactly two ZIPs plus `SHA256SUMS.txt`; historical assets remain unchanged.
 
