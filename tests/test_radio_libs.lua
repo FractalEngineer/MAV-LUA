@@ -16,6 +16,9 @@ local modules = {
   {name = 'pinput', dir = 'MAV'}, {name = 'params', dir = 'MAV'},
   {name = 'MAV', dir = 'TELEMETRY'},
   {name = 'MAV', dir = 'TOOLS'}, {name = 'MAVLUA_BUILD_INDEX', dir = 'TOOLS'},
+  -- Diagnostics are held to the same rule as shipped code. They are harder to re-test on a
+  -- radio, so a convention break costs more there, not less.
+  {path = 'tools/diag/MAVHEAP.lua'},
 }
 
 -- The globals EdgeTX provides on a monochrome radio, from linit.c's rotables table.
@@ -72,28 +75,57 @@ local function libraryUses(source)
   return found
 end
 
+-- Finds colon-method calls, which radio-side code must never use.
+--
+-- EdgeTX does not give strings a metatable __index, so `s:find(...)` raises
+-- "attempt to index a string value" on the radio while working perfectly on the desktop. That
+-- asymmetry is why every shipped module calls the library form, `string.find(s, ...)`, and it
+-- is not a style preference. A probe added later used `path:find('index')` and crashed on its
+-- first module on hardware; the library-name check below could not see it, because the callee
+-- was a local variable rather than a library. This check closes that gap.
+--
+-- A Lua label (`::name::`) is excluded by requiring the colon to follow a value rather than
+-- another colon.
+local function colonCalls(source)
+  local code = codeOnly(source)
+  local found = {}
+  for callee in code:gmatch('[%w_%)%]]%s*:%s*([A-Za-z_][A-Za-z0-9_]*)%s*%(') do
+    found[callee] = true
+  end
+  return found
+end
+
 local failures = 0
 local checked = 0
 for _, module in ipairs(modules) do
-  local path = string.format('%s/SCRIPTS/%s/%s.lua', root, module.dir, module.name)
+  local path = module.path or string.format('%s/SCRIPTS/%s/%s.lua', root, module.dir, module.name)
+  local label = module.path or (module.dir .. '/' .. module.name)
   local file = assert(io.open(path, 'r'))
   local source = file:read('a')
   file:close()
   local used = libraryUses(source)
   checked = checked + 1
+  -- A colon call needs a metatable on the value, which EdgeTX does not provide for strings.
+  -- No shipped module contains one, so any occurrence is a defect rather than a judgement call.
+  for callee in pairs(colonCalls(source)) do
+    failures = failures + 1
+    print(string.format('UNSAFE %s uses the colon method %s(), which has no metatable on a radio',
+      label, callee))
+  end
   -- Only these library names matter; a local variable is not a library reference, so a
   -- conservative check is right here: a false positive is a prompt to look, not a verdict.
   for _, lib in ipairs({'table', 'os', 'debug', 'package', 'coroutine', 'utf8'}) do
     if used[lib] and not radioGlobals[lib] then
       failures = failures + 1
-      print(string.format('UNSAFE %s/%s uses the %s library, absent on a monochrome radio',
-        module.dir, module.name, lib))
+      print(string.format('UNSAFE %s uses the %s library, absent on a monochrome radio',
+        label, lib))
     end
   end
 end
 
 if failures == 0 then
-  print(string.format('PASS: no radio-side module uses a missing library (%d checks)', checked))
+  print(string.format('PASS: no radio-side module uses a missing library or colon call (%d checks)',
+    checked))
 else
-  error(string.format('%d unsafe library reference(s)', failures))
+  error(string.format('%d unsafe radio-side reference(s)', failures))
 end

@@ -155,14 +155,21 @@ local function encode(name)
   return (string.gsub(name, '%d+', function(run) return string.char(#run) .. run end))
 end
 
--- Returns the given labels in natural order.
-local function naturalOrder(labels)
-  local keys = {}
-  for i = 1, #labels do keys[i] = encode(labels[i]) .. '\0' .. labels[i] end
+-- Sorts encoded keys and returns the run index each one carries.
+--
+-- The previous version built `encode(label) .. '\0' .. label` and then extracted the labels
+-- again, so every category name was held twice for the whole header phase. The key now ends
+-- with the run's index instead, so the result is a permutation of numbers rather than a
+-- second list of strings. The radio was measured with about 30 KiB obtainable in the build
+-- configuration, and that duplication was a large part of what consumed it.
+local function permutation(keys)
   sortStrings(keys)
-  local out = {}
-  for i = 1, #keys do out[i] = string.match(keys[i], '\0(.*)$') end
-  return out
+  local ord = {}
+  for k = 1, #keys do
+    local hi, lo = string.byte(keys[k], -2, -1)
+    ord[k] = hi * 256 + lo
+  end
+  return ord
 end
 
 -- Records are fixed width so any page can be read by seeking.
@@ -174,73 +181,109 @@ end
 -- Groups naturally-ordered labels into the top-level browse order and, for each numbered
 -- family, its members in order.
 --
--- Keeps only what the pager actually reads. Earlier shapes also built a per-index base array,
--- a flattened copy of every member, and a label-keyed copy of the name offsets: three extra
--- tables holding the same strings, which is what exhausted the radio heap during the header
--- phase. Members are grouped here once, and the offset shift is added when each record is
--- emitted instead of being stored. Sorting is not repeated per family either, since hundreds
--- of sorts would overflow a telemetry callback.
-local function organise(labels, counts)
-  -- The numbered base of each label is computed once and reused. Re-deriving it per pass
-  -- triples the pattern matches, which alone pushed the first header step past the
-  -- permanent-script instruction budget.
-  local bases, siblings = {}, {}
-  for i = 1, #labels do
-    local base = numberedBase(labels[i])
-    bases[i] = base
-    if base then siblings[base] = (siblings[base] or 0) + 1 end
+-- Deliberately tiny. This phase used to build a label-keyed table for every one of: name
+-- counts, name offsets, the numbered base of each label, sibling counts, member lists, the
+-- placed set and the child offsets. At a real vehicle's ~140 categories that is six
+-- hashtables keyed by the same strings, and it was the phase that exhausted the radio: the
+-- hardware probe measured about 30 KiB obtainable with the builder loaded, and an
+-- equivalent-shape host comparison measured this staging at 49 KiB against 26 KiB for the
+-- array-based shape used here.
+--
+-- Everything is derived from one scan of the label runs, and held as integer-keyed arrays:
+--
+--   lbl[i], at[i], cnt[i]  the i-th label run: its label, file offset and name count
+--   ord[k]                 the k-th run in natural order, i.e. a permutation of 1..n
+--   topName/topIdx/topFolder  the top-level rows, in browse order
+--   members[base]          a family's child rows, in natural order
+--
+-- Only `members` is keyed by a string, and only by the few labels that are actually families,
+-- so it stays small. Records are emitted straight from these as the header phase walks them,
+-- which is also why there is no child-offset table: the child block position is a running
+-- value, not something that has to be stored per family.
+-- Returns the browse plan as plain values, so nothing here is keyed by a label string except
+-- the few family member lists that are genuinely families.
+local function plan(n, lbl)
+  if n == 0 or n > MAX_LABELS then return nil end
+
+  local keys = {}
+  for i = 1, n do
+    keys[i] = encode(lbl[i]) .. '\0' .. string.char(math.floor(i / 256), i % 256)
   end
-  -- A base folds its members only when at least two numbered siblings exist, matching the
-  -- packaged database generator; a group of one would be a pointless extra level. Labels are
-  -- already in natural order, so members need no sorting here.
-  local families = {}
-  for i = 1, #labels do
-    local base = bases[i]
-    if base and siblings[base] >= 2 then
-      local group = families[base]
-      if not group then
-        group = {}
-        families[base] = group
-        -- The unnumbered base group is listed first when it has names of its own.
-        if counts[base] then group[1] = base end
+  local ord = permutation(keys)
+  keys = nil
+
+  -- The numbered base of each run, and how many runs share each base. A base folds its
+  -- members only when at least two numbered siblings exist, matching the packaged database
+  -- generator; a group of one would be a pointless extra level.
+  local baseOf = {}
+  local famCount = {}
+  for i = 1, n do
+    local b = numberedBase(lbl[i])
+    baseOf[i] = b
+    if b then famCount[b] = (famCount[b] or 0) + 1 end
+  end
+
+  local topName, topIdx, topFolder, topCount = {}, {}, {}, 0
+  local members = {}
+
+  local generalAt
+  for i = 1, n do
+    if lbl[i] == GENERAL then generalAt = i break end
+  end
+  if generalAt then
+    topCount = topCount + 1
+    topName[topCount], topIdx[topCount], topFolder[topCount] = GENERAL, generalAt, false
+  end
+
+  -- Walk natural order exactly once, tracking only the first member a family is seen at.
+  local placed = {}
+  for k = 1, n do
+    local i = ord[k]
+    if i ~= generalAt then
+      local b = baseOf[i]
+      if b and famCount[b] >= 2 then
+        if not placed[b] then
+          placed[b] = true
+          topCount = topCount + 1
+          topName[topCount], topIdx[topCount], topFolder[topCount] = b, nil, true
+          members[b] = {}
+        end
+        local group = members[b]
+        group[#group + 1] = i
+      elseif famCount[lbl[i]] and famCount[lbl[i]] >= 2 then
+        -- An unnumbered base such as RC is itself the folder, so it leads its own children
+        -- rather than being a row of its own.
+        if not placed[lbl[i]] then
+          placed[lbl[i]] = true
+          topCount = topCount + 1
+          topName[topCount], topIdx[topCount], topFolder[topCount] = lbl[i], i, true
+          members[lbl[i]] = {}
+        end
+        local group = members[lbl[i]]
+        group[#group + 1] = i
+      elseif lbl[i] ~= GENERAL then
+        topCount = topCount + 1
+        topName[topCount], topIdx[topCount], topFolder[topCount] = lbl[i], i, false
       end
-      group[#group + 1] = labels[i]
     end
   end
 
-  -- GENERAL first, matching the familiar packaged layout, then the remaining labels in order,
-  -- inserting each family folder where its first numbered member appeared.
-  local top, placed = {}, {}
-  if counts[GENERAL] then
-    top[1] = GENERAL
-    placed[GENERAL] = true
-  end
-  for i = 1, #labels do
-    local label, base = labels[i], bases[i]
-    if base and families[base] then
-      if not placed[base] then
-        placed[base] = true
-        top[#top + 1] = base
-      end
-    elseif families[label] then
-      -- An unnumbered base such as RC is represented by its folder, not as its own row, so it
-      -- must not also be added here or the category would appear twice.
-      if not placed[label] then
-        placed[label] = true
-        top[#top + 1] = label
-      end
-    elseif label ~= GENERAL then
-      top[#top + 1] = label
+  -- A family base with no run of its own still needs a folder row.
+  for b, group in pairs(famCount) do
+    if group >= 2 and not placed[b] then
+      placed[b] = true
+      topCount = topCount + 1
+      topName[topCount], topIdx[topCount], topFolder[topCount] = b, nil, true
+      members[b] = {}
     end
   end
-  -- A family whose base has no names of its own still needs a folder entry.
-  for base in pairs(families) do
-    if not placed[base] then
-      placed[base] = true
-      top[#top + 1] = base
-    end
+
+  local childCount = 0
+  for i = 1, topCount do
+    if topFolder[i] then childCount = childCount + #members[topName[i]] end
   end
-  return top, families
+  if topCount == 0 then return nil end
+  return ord, baseOf, topName, topIdx, topFolder, topCount, members, childCount
 end
 
 -- Accepts an io library and a file base path, so host tests can inject both.
@@ -251,14 +294,19 @@ return function(io, base)
 
   -- Resumable-build state. Handles stay open across callbacks; finish() and abort()
   -- both close them.
-  local labels, counts, order, starts, total = nil, nil, nil, nil, 0
   local source, runFile, runNumber, mergeTarget
   local runNames, runAt
   local mergeOut, mergeIn, heads, merged
   local analyseIn, analyseAt
-  local top, families
-  local outFile, headerCursor
-  local copyRemaining
+  local lbl, at, cnt, labelRuns, runLabel, runCount
+  local ord, baseOf
+  local topName, topIdx, topFolder, topCount, members, childCount
+  local total = 0
+  local planDone, headerAt, headerPhase, copyLeft
+  local childOf, childAt, childTop
+  local outFile
+  -- Forward-declared: the header phase hands over to the copy phase, which is defined after it.
+  local startCopy
 
   local function closeAll()
     if source then io.close(source) source = nil end
@@ -312,8 +360,13 @@ return function(io, base)
     self.names = 0
     self.complete = false
     self.count, self.topCount = nil, nil
-    labels, counts, order, starts, total = nil, nil, nil, nil, 0
-    top, families, headerCursor = nil, nil, nil
+    lbl, at, cnt, labelRuns = nil, nil, nil, 0
+    runLabel, runCount = nil, 0
+    ord, baseOf = nil, nil
+    topName, topIdx, topFolder, topCount, members, childCount = nil, nil, nil, 0, nil, 0
+    planDone, headerAt, headerPhase = false, 1, nil
+    childOf, childAt, childTop = nil, nil, 0
+    analyseAt, total = 0, 0
     mergeTarget, merged = 0, 0
     runNames, runAt = nil, nil
     sealed, self.expected = false, nil
@@ -467,22 +520,36 @@ return function(io, base)
     return 'merge'
   end
 
-  -- Scans the merged file in bounded batches, recording label order and each label's name
-  -- count. The merged file is ordered by name, so labels appear in natural order already;
-  -- they are collected here and sorted once at the end, because a label's first name decides
-  -- where it first appears.
+  -- Scans the merged file in bounded batches, recording one entry per LABEL RUN.
+  --
+  -- The merged file is ordered by name, and labels are contiguous within it: measured over the
+  -- real test fixtures, 23 distinct labels produced 23 runs and 0 splits, including the
+  -- RC/RC1..RC12 family, which stays together because every member starts with the same
+  -- prefix. That is what allows this phase to keep only the label it is currently inside,
+  -- rather than a table keyed by every label seen so far.
+  --
+  -- When the label changes, the run just finished is complete, so its count and offset are
+  -- final and are written straight into arrays. Nothing is keyed by a label string, and no
+  -- second pass over the data is needed.
   local function stepAnalyse()
     if not analyseIn then
       analyseIn = io.open(base .. '.nam', 'r')
       if not analyseIn then return nil end
-      counts, order, starts = {}, {}, {}
+      lbl, at, cnt = {}, {}, {}
+      labelRuns, runLabel, runAt, runCount = 0, nil, 0, 0
       analyseAt = 0
     end
     local block = io.read(analyseIn, ANALYSE_NAMES * NAME_SIZE)
     if not block or #block < NAME_SIZE then
       io.close(analyseIn) analyseIn = nil
-      if total == 0 or #order == 0 then return nil end
-      labels = naturalOrder(order)
+      if total == 0 then return nil end
+      -- Close the final run, which the loop below only closes on a change.
+      if runLabel then
+        if labelRuns >= MAX_LABELS then return nil end
+        labelRuns = labelRuns + 1
+        lbl[labelRuns], at[labelRuns], cnt[labelRuns] = runLabel, runAt, runCount
+      end
+      if labelRuns == 0 then return nil end
       return 'headers'
     end
     local count = math.floor(#block / NAME_SIZE)
@@ -491,17 +558,17 @@ return function(io, base)
         string.sub(block, (i - 1) * NAME_SIZE + 1, i * NAME_SIZE), '^[^%z]+')
       if name then
         local label = labelOf(name)
-        if not counts[label] then
-          if #order >= MAX_LABELS then return nil end
-          counts[label] = 0
-          order[#order + 1] = label
-          -- Record where this label's names begin. The scan is sequential, so this is the
-          -- real file offset and always matches the copy below. Deriving offsets from a
-          -- sorted label order instead would break for labels that sort differently as a
-          -- label than as a name (OSD1 before OSD_TYPE, but OSD before OSD1).
-          starts[label] = analyseAt
+        if label ~= runLabel then
+          if runLabel then
+            if labelRuns >= MAX_LABELS then return nil end
+            labelRuns = labelRuns + 1
+            lbl[labelRuns], at[labelRuns], cnt[labelRuns] = runLabel, runAt, runCount
+          end
+          -- Offset is the real file position of this run's first name. The scan is sequential,
+          -- so it always matches the file the copy phase writes.
+          runLabel, runAt, runCount = label, analyseAt, 0
         end
-        counts[label] = counts[label] + 1
+        runCount = runCount + 1
         total = total + 1
         analyseAt = analyseAt + NAME_SIZE
       end
@@ -509,103 +576,110 @@ return function(io, base)
     return 'analyse'
   end
 
-  -- Writes header records one per step: top-level records, then child records.
+  -- Writes header records one per step: top-level folders and categories, then child rows,
+  -- then copies the names.
+  --
+  -- Offsets come from the sequential analyse scan, so they always match the file the copy
+  -- phase writes. The name region starts after every header record, so the recorded position
+  -- is shifted by the header size. That shift is added as each record is emitted rather than
+  -- being stored per label, which previously duplicated every category name in a second
+  -- table. The parent's child-offset is likewise a running value, and the child cursor walks
+  -- families in constant time: scanning forward for a non-empty family here cost enough
+  -- instructions in one callback to exceed the permanent-script budget.
   local function stepHeaders()
-    if not headerCursor then
-      -- labels decides the browse order; offsets come from the sequential scan so they always
-      -- match the file the copy phase writes. The name region starts after every header
-      -- record, so the recorded position is shifted by the header size. That shift is added
-      -- when each record is emitted instead of being materialised into a second table keyed
-      -- by label, which previously duplicated every category name.
-      top, families = organise(labels, counts)
-      if #top == 0 then return nil end
-      local children = 0
-      for i = 1, #top do
-        local family = families[top[i]]
-        if family then children = children + #family end
-      end
-      -- Child records occupy the region immediately after the top-level block, so each
-      -- parent must point at the start of its own child block within that region.
-      local childOffsets, childCursor = {}, #top * RECORD_SIZE
-      for i = 1, #top do
-        local family = families[top[i]]
-        if family then
-          childOffsets[top[i]] = childCursor
-          childCursor = childCursor + #family * RECORD_SIZE
-        end
-      end
+    if not planDone then
+      local a, b, c, d, e, f, g, h = plan(labelRuns, lbl)
+      if not a then return nil end
+      ord, baseOf, topName, topIdx, topFolder, topCount, members, childCount = a, b, c, d, e, f, g, h
       outFile = io.open(base .. '.pdb', 'w')
       if not outFile then return nil end
-      headerCursor = {index = 1, phase = 'top', childOffsets = childOffsets, childCount = children}
+      planDone, headerAt, headerPhase = true, 1, 'top'
+      -- Child blocks begin after every top-level record, so the first folder's offset is the
+      -- size of the whole top-level block rather than zero. Starting at zero shifted every
+      -- folder by topCount * RECORD_SIZE, which the pager followed into the wrong region.
+      childOf, childAt, childTop = topCount * RECORD_SIZE, 1, 1
     end
 
-    local h = headerCursor
-    local shift = (#top + h.childCount) * RECORD_SIZE
-    if h.phase == 'top' then
-      if h.index > #top then
-        if h.childCount == 0 then
-          source = io.open(base .. '.nam', 'r')
-          if not source then return nil end
-          copyRemaining = total
-          return 'copy'
+    -- Child rows occupy the region immediately after the top-level block, so each folder
+    -- points at the start of its own child block inside that region.
+    local shift = (topCount + childCount) * RECORD_SIZE
+
+    -- A zero-argument call in tail position falls through to OP_RETURN on FreedomTX 1.40,
+    -- turning the result into no value at all. The handover is assigned before it is returned
+    -- for that reason, as elsewhere in this module.
+    if headerPhase == 'top' then
+      if headerAt > topCount then
+        if childCount == 0 then
+          local start = startCopy()
+          return start
         end
-        h.phase, h.index, h.fi, h.mi = 'child', 1, 1, 0
+        headerPhase, headerAt = 'child', 1
+        -- Advance to the first folder that actually has children.
+        while childTop <= topCount and not topFolder[childTop] do childTop = childTop + 1 end
+        if childTop > topCount then
+          local start = startCopy()
+          return start
+        end
+        childAt = 1
         return 'headers'
       end
-      local label = top[h.index]
-      -- A family folder points at its child block; a plain category at its names.
-      local family = families[label]
-      local blob = family and record(label, h.childOffsets[label], #family, true)
-        or record(label, shift + starts[label], counts[label])
+      local i = headerAt
+      local blob
+      if topFolder[i] then
+        -- A folder points at its child block and carries the high bit in its count.
+        blob = record(topName[i], childOf, #members[topName[i]], true)
+        childOf = childOf + #members[topName[i]] * RECORD_SIZE
+      else
+        -- A plain category points straight at its names.
+        local run = topIdx[i]
+        blob = record(topName[i], shift + at[run], cnt[run])
+      end
       if not blob or not io.write(outFile, blob) then return nil end
-      h.index = h.index + 1
+      headerAt = headerAt + 1
       return 'headers'
     end
-    -- Child phase. Records are emitted in the same order the copy phase writes names, which
-    -- is label order across families, matching the original flattened child list. The cursor
-    -- advances in constant time: scanning forward for a non-empty family here cost enough
-    -- instructions in one callback to exceed the permanent-script budget.
-    if h.mi >= (families[top[h.fi]] and #families[top[h.fi]] or 0) then
-      repeat
-        h.fi, h.mi = h.fi + 1, 0
-      until h.fi > #top or families[top[h.fi]]
+
+    -- Child phase: emit each family's members in turn, in natural order.
+    while childAt > #members[topName[childTop]] do
+      childTop = childTop + 1
+      while childTop <= topCount and not topFolder[childTop] do childTop = childTop + 1 end
+      if childTop > topCount then
+        local start = startCopy()
+        return start
+      end
+      childAt = 1
     end
-    if h.fi > #top then
-      source = io.open(base .. '.nam', 'r')
-      if not source then return nil end
-      copyRemaining = total
-      return 'copy'
-    end
-    h.mi = h.mi + 1
-    local label = families[top[h.fi]][h.mi]
-    local blob = record(label, shift + starts[label], counts[label])
+    local run = members[topName[childTop]][childAt]
+    local blob = record(lbl[run], shift + at[run], cnt[run])
     if not blob or not io.write(outFile, blob) then return nil end
-    h.index = h.index + 1
-    if h.index > h.childCount then
-      source = io.open(base .. '.nam', 'r')
-      if not source then return nil end
-      copyRemaining = total
-      return 'copy'
-    end
+    childAt = childAt + 1
     return 'headers'
+  end
+
+  -- Opens the merged name file for the copy phase.
+  function startCopy()
+    source = io.open(base .. '.nam', 'r')
+    if not source then return nil end
+    copyLeft = total
+    return 'copy'
   end
 
   -- Copies names in bounded batches. The merged file already matches the offsets written
   -- above, so this is a sequential copy with no seeking.
   local function stepCopy()
-    local want = math.min(COPY_NAMES, copyRemaining) * NAME_SIZE
+    local want = math.min(COPY_NAMES, copyLeft) * NAME_SIZE
     if want <= 0 then
       io.close(source) source = nil
       io.close(outFile) outFile = nil
       self.complete = true
       self.count = total
-      self.topCount = #top
+      self.topCount = topCount
       return 'done'
     end
     local block = io.read(source, want)
     if not block or #block == 0 then return nil end
     if not io.write(outFile, block) then return nil end
-    copyRemaining = copyRemaining - math.floor(#block / NAME_SIZE)
+    copyLeft = copyLeft - math.floor(#block / NAME_SIZE)
     return 'copy'
   end
 

@@ -1,8 +1,16 @@
 # MAV-LUA development guide
 
-## Latest handoff — 2026-09-21
+## Latest handoff — 2026-09-22
 
-Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.3 is the hardware-confirmed baseline for Navigation, Messages, ready-to-arm status, and category-first ArduPilot parameter browsing. The next feature line replaces packaged-database browsing with a vehicle-discovered parameter index; see [docs/V0.2.0-ROADMAP.md](docs/V0.2.0-ROADMAP.md).
+Read [HANDOFF.md](HANDOFF.md) before continuing. **This branch is archived.** The on-radio
+parameter index is shelved: it failed on hardware at about 739 names, and the radio has since
+been measured directly, so the reason is known rather than guessed. v0.1.3's packaged `.pdb`
+browsing is the browse source again and works today.
+
+The measurements that outlive the attempt are in the handoff and in `tools/diag/MAVHEAP.lua`.
+The short version: a Tool has about 68 KiB of Lua heap, **a build has about 30 KiB of it**, the
+limit is total size rather than fragmentation, and the application core cannot load inside a Tool
+at all.
 
 ## Working agreement
 
@@ -11,10 +19,12 @@ Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.3 is the hardware-confirme
 - Use one telemetry queue consumer. Parameter code receives packets from the core dispatcher and must not pop the CRSF queue itself.
 - Parameter traffic is opt-in. Never write on scroll or during editing. Require explicit Save and matching autopilot readback before reporting success.
 - Do not equate CRSF device parameters with autopilot parameters. Stock ExpressLRS telemetry does not expose a raw autopilot parameter stream to handset Lua.
-- Parameter names come from the connected vehicle, not a packaged list. There is no offline or pre-populated browsing: a name is only usable once it has actually been read from the flight controller. Do not reintroduce packaged `.pdb` name assets as the browse source.
-- Keep the discovered index bounded and built in one deliberate pass. Do not restore the naive full live-list download with per-record SD writes or a `params.tmp` scratch file; those designs failed on radio. Building a fixed-record index in bounded runs, then browsing it by seek, is the intended replacement. The index is written **directly into `SCRIPTS/MAV/`** as `i<major><minor><plane|copter>.pdb`: EdgeTX's `io` library exposes only open/close/read/write/seek, so there is no `mkdir`, and FatFs will not create a missing parent, which means the builder can only write into a folder the package already ships. Never move the index back into a subdirectory.
-- **Never use the `table` library, `os`, `debug`, `package`, `coroutine` or `utf8` in radio-side code.** EdgeTX registers `table` only inside `#if defined(COLORLCD)` in its `linit.c`, so on a monochrome radio `table` is `nil` and any call raises `attempt to index a nil value (global 'table')`. Host Lua always provides every library, so a desktop test that simply runs a module cannot detect this. `index.lua` implements its own merge sort and join for exactly this reason, and `tests/test_index_sandbox.lua` runs a real build with `table` removed so the dependency cannot return.
-- **Never build a large string by concatenating in a loop.** Repeated `..` allocates every intermediate result, and Lua collects incrementally with a debt threshold that scales with live memory, so the garbage piles up instead of being reclaimed promptly. One run of 64 padded names cost about 33 KiB of garbage for a 1 KiB payload and drove a 509 KiB peak at 700 names, which is what made the build fail and freeze the radio. Write fixed-size records to the open file one at a time, in bounded batches, as the run and merge phases do. Note the diagnostics differ: `..` raises plain `not enough memory`, while `string.rep`, `string.gsub` expansion and `io.read('*a')` grow a `luaL_Buffer` and raise `not enough memory for buffer allocation` — so that second message points at those calls, not at concatenation. A capped-allocator test cannot catch the accumulation, because a tight limit drives the collector continuously and masks it; `tests/test_index_writes.lua` asserts the write shape instead.
+- **Do not treat the host memory harness as evidence that a radio memory path is fixed.** It runs under a capped allocator, and forcing collection at a tight cap hides accumulated garbage, so it reports improvements that hardware does not confirm. Several iterations of a failed attempt looked like convergence for that reason, and roughly 200k tokens were spent on it. Radio memory claims need radio evidence; `tools/diag/MAVHEAP.lua` exists to supply it. Measure a design's fit **before** implementing it.
+- **Establish that a whole operation fits the budget before building features on it.** Adding safeguards to a build that did not fit never converged: every change reduced a measured number and none changed the outcome.
+- **Never use the `table` library, `os`, `debug`, `package`, `coroutine` or `utf8` in radio-side code.** EdgeTX registers `table` only inside `#if defined(COLORLCD)` in its `linit.c`, so on a monochrome radio `table` is `nil` and any call raises `attempt to index a nil value (global 'table')`. Host Lua always provides every library, so a desktop test that simply runs a module cannot detect this. `tests/test_radio_libs.lua` runs the shipped modules in a reduced sandbox so the dependency cannot return.
+- **Never use colon-method syntax on radio-side values.** EdgeTX gives strings no metatable `__index`, so `s:find(...)` raises `attempt to index a string value` on the radio while working perfectly on the desktop. Every shipped module calls the library form, `string.find(s, ...)`. `tests/test_radio_libs.lua` rejects colon calls too, because the missing-library check cannot see them: the callee is a variable, not a library.
+- **Never build a large string by concatenating in a loop.** Repeated `..` allocates every intermediate result, and Lua collects incrementally with a debt threshold that scales with live memory, so the garbage piles up instead of being reclaimed promptly. One run of 64 padded names cost about 33 KiB of garbage for a 1 KiB payload. Write fixed-size records to the open file one at a time, in bounded batches. Note the diagnostics differ: `..` raises plain `not enough memory`, while `string.rep`, `string.gsub` expansion and `io.read('*a')` grow a `luaL_Buffer` and raise `not enough memory for buffer allocation` — so that second message points at those calls, not at concatenation.
+- `uninstall-mav-lua.bat` lives in `src/` so it ships to the card root beside `SCRIPTS`, and removes every MAV-LUA file from the card it is run from. Keep it in step with the shipped file list whenever files are added or removed. Old `.luac` caches are the usual reason an update appears to do nothing.
 - Preserve LICENSE/SPDX and desktop font notices.
 - Never rewrite a release tag. New releases ship exactly two ZIPs plus `SHA256SUMS.txt`; historical assets remain unchanged.
 

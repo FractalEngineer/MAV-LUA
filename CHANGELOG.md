@@ -2,21 +2,72 @@
 
 ## Unreleased
 
-- Superseded packaged parameter databases. Parameter names now come from the connected flight controller: MAV reads the vehicle's own parameter list once and builds a fixed-record index on SD, then browses that index locally. Packaged `.pdb` name assets are no longer the browse source, and the assets themselves are removed from the package.
-- Moved the index build into a standalone Tools script, **Tools > MAV Index**. Building it from inside the Parameters page needed about 128 KiB because the browser modules were already resident, which exhausted the radio heap and failed on every retry. The tool loads only the wire codec and the builder in its own Lua state, about 80 KiB at worst, and is not limited by the permanent-script instruction budget. The Parameters page now reports that no index exists and points at the tool.
-- The tool writes the same identity-derived index the page browses, so the two cannot disagree, and a firmware change still resolves to "no index yet".
-- Fixed the index build failing partway through with `attempt to index a nil value (global 'table')`. The builder used `table.sort` and `table.concat`, which exist on the desktop and on a colour radio, but EdgeTX registers the `table` library only for colour radios, so on a monochrome handset it is `nil`. The builder now sorts and joins without any library, and a sandbox test builds a real index with `table` removed.
-- Fixed the index build working only on the second attempt. The list request was sent once and never retried, but the TX bridge refuses a request that follows another too closely and tells Lua nothing when it does, so the first attempt silently read nothing. The request is now re-sent until a name arrives, with a bounded number of attempts and a message that distinguishes a module without list support from a vehicle reporting no names.
-- The builder no longer treats an instruction count as a hard budget. It runs as a Tools script, which EdgeTX does not give the permanent-script instruction limit, so the previous 8,000-instruction ceiling was measuring the wrong thing and is now a loose regression tripwire alongside a wall-clock check.
-- Fixed the index build failing with a bare `Index build failed`: the builder wrote into `SCRIPTS/MAV/DB`, which existed only because the packaged databases created it. EdgeTX's `io` has no `mkdir` and FatFs does not create a missing parent, so removing those assets made the first write fail. The index now sits beside the modules in `SCRIPTS/MAV/`, and the tool clears the screen before drawing so the previous Tools menu no longer shows through.
-- An index build that receives no parameters now says why: no stream at all points at the TX module firmware, while a stream with no usable names blames the vehicle. A stale module firmware previously produced a silent `0 names`.
-- Optional parameter modules now load the compiled `.luac` cache when one exists and compile only when it is missing. Forcing compilation while a valid cache existed re-paid the entire compile peak on every page open, which the radio reported as `not enough memory` on an open that then succeeded when retried.
-- Both packages now ship a validated `.luac` cache beside each `.lua`. A first parameter-index build had no cached builder, so EdgeTX had to compile it; when that compile ran out of heap it failed before writing a cache, so every retry failed the same way. Loading the cache instead of compiling moves that path from about 180 KiB to about 158 KiB.
-- A failed index-builder load now reports the loader's own message instead of a generic `Index build failed`, so an out-of-memory compile is distinguishable from a missing index.
-- Fixed the index build exhausting the radio heap and freezing around 700 names. The run phase accumulated each run's 64 padded names with `..` and wrote the result in one call, which allocates every intermediate string: about 33 KiB of garbage for a 1 KiB payload, and the collector cannot keep up because its debt threshold scales with live memory. The phase now writes each record separately, in bounded batches, so peak memory fell from 509 KiB to 197 KiB at 700 names and no longer scales with the number of runs. Padding also no longer calls `string.rep` per record; that call grows a `luaL_Buffer`, which is why the failure was reported as `not enough memory for buffer allocation` rather than plain `not enough memory`.
-- Added a regression test asserting the run file only ever receives a header or one 16-byte record, because a capped-allocator test cannot detect the accumulation: a tight limit drives the collector continuously and masks it.
-- Documented the discovered-index decision, the bounded/atomic build rules, and the ExpressLRS `PARAM_REQUEST_LIST` list session it requires.
-- Added `uninstall-mav-lua.bat` to `src/`, which ships at the package root beside `SCRIPTS` so it can remove a previous install in one run before copying new files.
+**This release line is archived. The on-radio parameter index is shelved and packaged-database
+browsing is the browse source again.** The attempt got much further than the first one, but it
+still could not finish a build on hardware: it fails at about 739 names found. The radio has since
+been measured directly, so the failure is now understood rather than guessed at. The work is kept
+here for reference; see `main` for the shipped state.
+
+### What was measured
+
+`tools/diag/MAVHEAP.lua` is a diagnostic Tools script that measures the Lua heap on the device and
+appends each result to `/MAVHEAP.TXT` as it goes, so a stall still leaves the answer. Three runs
+gave a `bare` configuration of 56 KiB obtainable, a `build` configuration (wire + index loaded) of
+**30 KiB**, and a `full` configuration of 9 KiB. Total Lua heap in a Tools state is about 68 KiB.
+Those numbers outlive the attempt, and they are the reason it failed: a build's whole budget for
+staging tables, sort runs and file buffers is about 30 KiB.
+
+Two further findings are worth keeping. The binding limit is total size, not fragmentation: a 16 KiB
+largest contiguous allocation is ample for the ~1 KiB blocks a builder uses. And the application core
+cannot load inside a Tools state at all, because it needs more than the 9 KiB that leaves, so a tool
+cannot host the browser.
+
+### What was tried
+
+- Building the index in the Parameters page needed about 128 KiB with the browser resident, so it
+  exhausted the heap on every retry.
+- Moving the build into a standalone Tools script, **Tools > MAV Index**, reached the build but still
+  exhausted the heap while running. A tool gets its own Lua state and is exempt from the
+  permanent-script instruction budget, but not more memory: EdgeTX's `custom_l_alloc` draws every
+  state from one pool.
+- Removing the `table` library dependency fixed a genuine crash, since `table` is `nil` on a
+  monochrome radio, and changed nothing about memory.
+- Removing a per-record `string.rep` and a looped `..` concatenation cut the host-measured run-phase
+  peak from 509 KiB to 197 KiB and changed nothing on the radio.
+- Replacing six label-keyed staging tables and a duplicated label list with integer-indexed arrays
+  and a permutation reduced resident header-phase staging by 26% on the host, from 47.1 to 34.9 KiB,
+  and still did not fit. That is evidence the remaining cost is structural rather than a table or two.
+
+### Why the host figures misled
+
+The host memory harness runs under a capped allocator, and forcing collection at a tight cap hides
+accumulated garbage, so it reported improvements hardware never confirmed. Several iterations of this
+attempt looked like convergence for that reason. Radio memory claims now require radio evidence.
+
+### Kept
+
+- `src/uninstall-mav-lua.bat`, which removes every MAV-LUA file from the card it is run from. It is
+  useful regardless of how names are eventually obtained, and it also removes the stale `.luac`
+  caches that otherwise make an update appear to do nothing.
+- `tools/diag/MAVHEAP.lua` and `tests/test_heap_probe.lua`, so a future attempt can measure the heap
+  before designing against it.
+- The ExpressLRS bounded list session on `feature/mavlink-lua-parameter-list`. Nothing consumes it,
+  so it is an unproven prerequisite rather than a working feature.
+
+### Also fixed along the way, and still valid
+
+- Optional parameter modules load the compiled `.luac` cache when one exists and compile only when
+  it is missing. Forcing compilation while a valid cache existed re-paid the entire compile peak on
+  every page open, which the radio reported as `not enough memory` on an open that then succeeded
+  when retried.
+- Both packages ship a validated `.luac` cache beside each `.lua`.
+- An index build with no parameters reports why: no stream points at the TX module firmware, a
+  stream with no usable names blames the vehicle.
+- The builder writes into `SCRIPTS/MAV/` rather than a subdirectory, because EdgeTX's `io` has no
+  `mkdir` and FatFs does not create a missing parent.
+- `tests/test_radio_libs.lua` now rejects colon-method calls such as `s:find(...)` in radio-side code
+  in addition to missing libraries, because EdgeTX gives strings no metatable and the callee of a
+  colon call is a variable rather than a library.
 
 ## v0.1.3
 
