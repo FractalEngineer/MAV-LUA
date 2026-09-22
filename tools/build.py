@@ -157,6 +157,13 @@ def package(compiler=None, compiler53=None, version="dev"):
                 info.create_system = 3
                 info.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(info, portable_bytes(ROOT / doc))
+            # Card helper scripts live in src/ so they are copied to the SD card with the rest.
+            # They are archived at the package root, because on the card they sit beside SCRIPTS.
+            for helper in sorted((ROOT / 'src').glob('*.bat')):
+                info = zipfile.ZipInfo(helper.name, date_time=timestamp)
+                info.create_system = 3
+                info.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(info, portable_bytes(helper))
             info = zipfile.ZipInfo("VERSION.txt", date_time=timestamp)
             info.create_system = 3
             compatibility = "Before EdgeTX 2.11 RC1" if binary else "EdgeTX 2.11 RC1 or newer"

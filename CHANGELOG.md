@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added `uninstall-mav-lua.bat`. It ships at the package root beside `SCRIPTS`, removes every MAV-LUA file from the card it is run from, and needs no path argument. It removes the built parameter index along with the modules, so the next run reads the vehicle again rather than letting a stale index shadow a new one. It refuses a folder that has no `SCRIPTS` beside it instead of guessing, and verifies afterwards that the files are actually gone.
+
+### Attempted and reverted: vehicle-discovered parameter index
+
+An attempt was made to replace the packaged parameter databases with an index built on the radio from the vehicle's own streamed parameter list. **It failed on hardware and is not part of this release.**
+
+- The build reports `not enough memory for buffer allocation` from around 700 names found, and the radio sometimes freezes at the same point. The builder cannot finish inside the radio heap.
+- Building inside the Parameters page needed about 128 KiB with the browser already resident. Moving the build to a standalone Tools script (`SCRIPTS/TOOLS/MAVLUA_BUILD_INDEX.lua`) reached the build but still exhausted the heap during it.
+- Sorting without the `table` library, removing per-record `string.rep` padding, and writing records individually in bounded batches all reduced the peak measured on the host, and none of it changed the outcome on the radio.
+- The host memory harness is not a trustworthy predictor for this path. It runs under a capped allocator, and forcing collection at a tight cap hides accumulated garbage, so it reported improvements that hardware did not confirm.
+
+The packaged `.pdb` browsing shipped in v0.1.3 therefore remains the browse source. The full attempt is preserved on the `self-building-index` branch for reference; do not merge it as-is. The uninstaller above is the one part of that work kept, because it is useful regardless of how the index is eventually built.
+
 ## v0.1.3
 
 - Replaced the hardware-rejected neighboring-window cache with Mission Planner-style first-level category browsing.

@@ -1,8 +1,10 @@
 # MAV-LUA development guide
 
-## Latest handoff — 2026-09-15
+## Latest handoff — 2026-09-22
 
-Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.3 is the hardware-confirmed baseline for Navigation, Messages, ready-to-arm status, and category-first ArduPilot parameter browsing. The next feature line is the firmware-agnostic transport and radio-side adapter work in [docs/V0.2.0-ROADMAP.md](docs/V0.2.0-ROADMAP.md).
+Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.3 is the hardware-confirmed baseline for Navigation, Messages, ready-to-arm status, and category-first ArduPilot parameter browsing.
+
+A vehicle-discovered parameter index was attempted and **failed on hardware**: the build reports `not enough memory for buffer allocation` from around 700 names and sometimes freezes the radio. It is preserved on the `self-building-index` branch and must not be merged as-is. Do not rebuild the index on the radio without first establishing that a whole build fits the radio heap. The next feature line is the firmware-agnostic transport and radio-side adapter work in [docs/V0.2.0-ROADMAP.md](docs/V0.2.0-ROADMAP.md).
 
 ## Working agreement
 
@@ -12,6 +14,8 @@ Read [HANDOFF.md](HANDOFF.md) before continuing. v0.1.3 is the hardware-confirme
 - Parameter traffic is opt-in. Never write on scroll or during editing. Require explicit Save and matching autopilot readback before reporting success.
 - Do not equate CRSF device parameters with autopilot parameters. Stock ExpressLRS telemetry does not expose a raw autopilot parameter stream to handset Lua.
 - Keep parameter state bounded. Do not restore the full live-list download, runtime SD database writes, or `params.tmp`; those designs failed on radio. Packaged immutable `.pdb` name assets are intentional.
+- **Do not treat the host memory harness as evidence that a radio memory path is fixed.** It runs under a capped allocator, and forcing collection at a tight cap hides accumulated garbage, so it reports improvements that hardware does not confirm. A change to radio memory behaviour needs radio evidence. This is what made one failed attempt look like progress for many iterations.
+- `uninstall-mav-lua.bat` lives in `src/` so it ships to the card root beside `SCRIPTS`, and removes every MAV-LUA file from the card it is run from. Keep it in step with the shipped file list whenever files are added or removed.
 - Preserve LICENSE/SPDX and desktop font notices.
 - Never rewrite a release tag. New releases ship exactly two ZIPs plus `SHA256SUMS.txt`; historical assets remain unchanged.
 

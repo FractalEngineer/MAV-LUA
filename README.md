@@ -29,10 +29,15 @@ Download the matching package from [Releases](https://github.com/FractalEngineer
 | EdgeTX 2.11 RC1 or newer | `MAV-LUA-<version>_source.zip` |
 | Earlier EdgeTX/FreedomTX | `MAV-LUA-<version>_precompiled.zip` |
 
-1. Remove old MAV `.luac` caches before installing the source package: `SCRIPTS/TELEMETRY/MAV.luac`, `SCRIPTS/TOOLS/MAV.luac`, files under `SCRIPTS/MAV`, and `WIDGETS/MAV/main.luac` where present.
-2. Copy the package's complete `SCRIPTS` folder to the SD card. Color-radio users should copy `WIDGETS` as well.
-3. Select **MAV** as a telemetry screen, or launch **MAV** from Tools on radios whose telemetry menu reserves PAGE.
-4. Discover telemetry sensors, then reload the model or restart the radio.
+1. Copy the package's complete `SCRIPTS` folder to the SD card, plus `WIDGETS` on color radios. Put `uninstall-mav-lua.bat` at the card's top level, beside `SCRIPTS`.
+2. Select **MAV** as a telemetry screen, or launch **MAV** from Tools on radios whose telemetry menu reserves PAGE.
+3. Discover telemetry sensors, then reload the model or restart the radio.
+
+### Updating an existing install
+
+Run `uninstall-mav-lua.bat` from the card's top level with the card in a reader on the PC, not in the radio. It removes every MAV-LUA file from the card it is run from, including old `.luac` caches that would otherwise shadow a new package, so no manual deletion is needed. Add `/y` to skip the confirmation prompt.
+
+Only MAV-LUA files are deleted; nothing else on the card is touched and the card is never formatted. The script refuses to run if it cannot find a `SCRIPTS` folder beside itself.
 
 Use an ArduPilot vehicle over ExpressLRS MAVLink mode. Disable other telemetry scripts that consume the same CRSF queue.
 
@@ -48,7 +53,7 @@ Use an ArduPilot vehicle over ExpressLRS MAVLink mode. Disable other telemetry s
 
 On touch radios, horizontal swipes change pages, vertical swipes scroll, and taps select. Hold Exit to close the Tools application.
 
-If Enter still changes pages after updating, the radio is loading an old cache. Remove the `.luac` files listed above, reinstall the complete package, and restart.
+If Enter still changes pages after updating, the radio is loading an old cache. Run `uninstall-mav-lua.bat`, install the complete package again, and restart.
 
 ## Ready-to-arm status
 

@@ -1,4 +1,4 @@
-# MAV-LUA handoff — 2026-09-15
+# MAV-LUA handoff — 2026-09-22
 
 ## Current state
 
@@ -8,11 +8,32 @@ The neighboring-window prefetch/cache was hardware-tested and rejected: the TBS 
 
 The tiny database manifests retain only firmware/vehicle identity, path, and top-level category count. Fixed 22-byte category records and 16-byte names are paged directly from `.pdb`; repeated numbered groups such as RC/RC1..RC16 are nested under one bounded second-level folder. All browse levels wrap at their first and last items. Runtime state retains only the current eight categories or names. It never downloads the full live list and never writes parameter data to SD. The databases are generated from official ArduPilot metadata. ArduPilot exact-name replies use `param_index=-1`; both Lua and the TX bridge accept that sentinel instead of treating it as an out-of-range or empty indexed slot. Host tests cover complete 201-name OSD1 scrolling with no parameter requests, firmware selection, direct page reads, named-read retries, and write safeguards. Firmware discovery, nested browsing, wraparound, reads, editing, and verified saves were accepted on hardware with Plane 4.8.
 
+## Failed attempt: the vehicle-discovered index
+
+A later attempt replaced the packaged databases with an index built on the radio from the vehicle's own streamed parameter list. **It failed on hardware and was reverted.** It is preserved on the `self-building-index` branch for reference. Do not merge it as-is.
+
+The failure: the build reports `not enough memory for buffer allocation` from around 700 names found, and the radio sometimes freezes at the same point. The builder cannot complete inside the radio heap.
+
+What was tried, and what each did not achieve:
+
+- Building in the Parameters page needed about 128 KiB with the browser resident, which exhausted the heap on every retry.
+- Moving the build into `SCRIPTS/TOOLS/MAVLUA_BUILD_INDEX.lua` reached the build. A Tools script gets its own Lua state with the permanent scripts paused and is not subject to the instruction budget, but the build still exhausted the heap while running.
+- Removing the `table` library dependency (a Lua merge sort and join) fixed a real crash — `table` is `nil` on a monochrome radio — without fixing the memory use.
+- Removing per-record `string.rep` padding and eliminating a looped `..` concatenation in the run phase reduced the peak the host measured from 509 KiB to 197 KiB at 700 names, and changed nothing on the radio.
+- Writing records individually in bounded batches, and re-sending the list request until a name arrived (which fixed a first-attempt failure), were both correct changes on their own terms. Neither made the build fit.
+
+Two conclusions worth keeping:
+
+- **The host memory harness is not a trustworthy predictor for this path.** It runs under a capped allocator, and forcing collection at a tight cap hides accumulated garbage, so it reported improvements that hardware did not confirm. Host peak figures for a build of this kind should be treated as indicative only, and never as evidence a radio path is fixed.
+- **Adding safeguards to a failing build did not converge.** The build failed across many iterations with a different symptom each time. Any future attempt should establish that the whole build fits the radio heap *before* adding features on top of it, rather than discovering the ceiling mid-implementation.
+
+Kept from this work: `src/uninstall-mav-lua.bat`, which removes every MAV-LUA file from the card it is run from and is useful regardless of how the index is eventually built.
+
 ## Next priority
 
-Implement the [v0.2.0 roadmap](docs/V0.2.0-ROADMAP.md): keep ExpressLRS as a generic, bounded MAVLink transport and move firmware identity, database selection, reply correlation, and wire conversion behind MAV-LUA adapters. The acceptance test is that PX4 can be added later without another ExpressLRS bridge change.
+Two directions are open. The immediate one is to reconsider how parameter names are obtained at all, since both the packaged-database approach and the on-radio build now have hardware evidence against them. The other is the [v0.2.0 roadmap](docs/V0.2.0-ROADMAP.md): keep ExpressLRS as a generic, bounded MAVLink transport and move firmware identity, database selection, reply correlation, and wire conversion behind MAV-LUA adapters, so PX4 can be added later without another ExpressLRS bridge change.
 
-Do not reintroduce the abandoned full live-list download, `params.tmp`, or runtime database writes. Those approaches caused radio freezes and allocation failures. The packaged `.pdb` files are immutable installation assets with fixed 16-byte name records, not a downloaded cache.
+Do not reintroduce the abandoned full live-list download, `params.tmp`, or runtime database writes. Those approaches caused radio freezes and allocation failures. The packaged `.pdb` files are immutable installation assets with fixed 16-byte name records, not a downloaded cache. If the index idea is revisited, note that the ExpressLRS bridge change it needs is a bounded list session accepting `PARAM_REQUEST_LIST`; that bridge work is separable from the builder and was validated with native tests, but it is upstream-neutral and ships on its own branch.
 
 ## Safety and protocol contracts
 
