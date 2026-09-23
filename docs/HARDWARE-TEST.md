@@ -18,7 +18,7 @@ This checklist is for MAV-LUA v0.1.3 and later. Back up the model, remove propel
 3. Open `OSD`, then `OSD1`, and scroll across many eight-name pages in both directions. Scrolling must remain responsive and must not create parameter telemetry. PAGE away during firmware detection and return to confirm clean cancellation.
 4. Leave the browser active for at least 15 minutes while navigating large categories. Check for resets, sluggish controls, allocation errors, and correct recovery from link loss.
 5. Select a harmless numeric parameter and compare the on-demand value with the ground station. Change it, back out, and confirm no write occurred.
-6. Repeat the edit and explicitly Save while disarmed. Require `Saved and verified`, then independently confirm the value. Test an armed or stale-heartbeat attempt and confirm it is blocked.
+6. Repeat the edit and explicitly Save. Require `Saved and verified`, then independently confirm the value. Test a stale-heartbeat attempt and confirm it is blocked.
 7. Interrupt one save after transmission. The UI must report an unconfirmed outcome and must not automatically repeat the write.
 
 The v0.1.3 category-first browser was accepted with ArduPilot Plane 4.8 on the Alpha/Zorro setup after firmware selection, nested-group navigation, wraparound, exact-name reads, editing, and verified saves. It uses packaged, read-only databases and retains only the current eight category or name records. Repeat the soak for every new database family, firmware adapter, or material transport change.

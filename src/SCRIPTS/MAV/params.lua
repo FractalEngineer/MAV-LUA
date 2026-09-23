@@ -8,7 +8,7 @@ local s = {state='prompt', rows={}, selected=1, pageStart=1,
   steps={0.000001, 0.00001, 0.0001, 0.001, 0.01, 0.1, 1, 10, 100, 1000, 10000, 100000, 1000000}}
 
 local function ready(now)
-  return s.heartbeatAt and now >= s.heartbeatAt and now - s.heartbeatAt <= 300 and not s.armed
+  return s.heartbeatAt and now >= s.heartbeatAt and now - s.heartbeatAt <= 300
 end
 
 local function clearGroup()
@@ -43,7 +43,7 @@ local function begin(now)
   s.database, s.dbkey, s.dbVersion, s.vehicleName, s.firmware = nil, nil, nil, nil, nil
   for i = #s.categoryRows, 1, -1 do s.categoryRows[i] = nil end
   s.categoryTotal = nil
-  s.sys, s.comp, s.vehicle, s.heartbeatAt, s.armed = nil, nil, nil, nil, nil
+  s.sys, s.comp, s.vehicle, s.heartbeatAt = nil, nil, nil, nil
   s.categorySelected, s.categoryPageStart, s.categoryIndexOffset = 1, 1, 0
   s.folderName, s.parentPageStart, s.parentSelected = nil, nil, nil
   s.nextAt, s.lastPing = now, nil
@@ -68,7 +68,7 @@ local function receive(frame, now)
       s.sys, s.comp, s.vehicle = source, component, string.byte(payload, 5)
     end
     if s.sys ~= source or s.comp ~= component then return end
-    s.heartbeatAt, s.armed = now, string.byte(payload, 7) >= 128
+    s.heartbeatAt = now
     if s.state == 'connect' and s.pending and s.pending.sent then
       s.pending, s.state = nil, 'identity'
       request('version')
@@ -107,7 +107,7 @@ local function receive(frame, now)
     failure('Parameter changed')
   elseif kind == 'check' then
     if p.value ~= s.current.value then failure('Value changed: reopen') return end
-    if not ready(now) then failure('Disarm / check link') return end
+    if not ready(now) then failure('Check link') return end
     s.state = 'saving'
     request('write', p.name)
   elseif kind == 'verify' then
@@ -170,7 +170,7 @@ local function tick(now, linked, visible)
     return
   end
   local kind = s.pending.kind
-  if kind == 'write' and not ready(now) then failure('Disarm / check link') return end
+  if kind == 'write' and not ready(now) then failure('Check link') return end
   local frame = kind == 'connect' and wire.ping()
     or kind == 'version' and wire.versionRequest(s.sys, s.comp)
     or kind == 'write' and wire.write(s.sys, s.comp, s.current, s.edited)

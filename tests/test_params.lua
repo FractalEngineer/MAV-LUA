@@ -101,7 +101,7 @@ local serial = 0
 local function fixture(options)
   options = options or {}
   serial = serial + 1
-  local f = {now=0, sent=0, sets=0, connected=true, module=true, armed=false,
+  local f = {now=0, sent=0, sets=0, connected=true, module=true,
     output={}, replies={}, frames={}, reads={}, values={}, vehicle=options.vehicle or 2,
     major=options.major or 4, minor=options.minor or 7, patch=options.patch or 0}
   local env = setmetatable({}, {__index=_G})
@@ -164,8 +164,7 @@ local function fixture(options)
   end
   function f.heartbeat()
     if f.module and not f.noHeartbeat then
-      f.deliver(chunks(packet(0, string.pack('<I4BBBBB', 0, f.vehicle, 3,
-        f.armed and 129 or 1, 3, 3)))[1])
+      f.deliver(chunks(packet(0, string.pack('<I4BBBBB', 0, f.vehicle, 3, 1, 3, 3)))[1])
     end
   end
   function f.param(name, value, kind)
@@ -259,8 +258,10 @@ f.action('next') f.action('enter')
 check(f.sets == 1, 'review defaults Back')
 f.action('enter')
 check(f.draw():find('Step:', 1, true), 'Back returns to editor')
-f.armed = true f.heartbeat() f.reviewSave()
-check(f.draw():find('Disarm / check link', 1, true) and f.sets == 1, 'armed save blocked')
+f.noHeartbeat = true
+for _ = 1, 35 do f.tick() end
+f.reviewSave()
+check(f.draw():find('Check link', 1, true) and f.sets == 1, 'stale heartbeat blocks a save')
 
 f = fixture() f.load() f.open() f.edit() f.action('next') f.values.AUTO_OPTIONS = 7
 f.reviewSave() f.waitFor('Value changed: reopen')

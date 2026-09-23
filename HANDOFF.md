@@ -2,7 +2,7 @@
 
 ## Current state
 
-v0.1.3 is the current hardware-confirmed release with Navigation, Messages, ready-to-arm status, and a streamlined ArduPilot parameter browser. It never starts parameter traffic until Load is pressed.
+v0.1.4 is the current release with Navigation, Messages, ready-to-arm status, and a streamlined ArduPilot parameter browser. It never starts parameter traffic until Load is pressed.
 
 The neighboring-window prefetch/cache was hardware-tested and rejected: the TBS Alpha again froze completely after several scrolls. v0.1.3 replaces indexed browsing with a category-first, read-only database. Load discovers the ArduPilot vehicle and requests `AUTOPILOT_VERSION`; the result selects an exact 4.6, 4.7, or 4.8 Plane/Copter database. Category and name scrolling are local. Opening an eight-name page reads exactly 128 bytes from the packaged `.pdb`; only ENTER on a name sends an exact-name `PARAM_REQUEST_READ`.
 
@@ -95,7 +95,7 @@ on `feature/mavlink-lua-parameter-list`, but nothing consumes it.
 ## Safety and protocol contracts
 
 - `READY` comes from MAVLink `SYS_STATUS` pre-arm present/enabled/health masks; `ARMED` comes from the explicit ArduPilot status bit. Status text is never used as state.
-- Parameter writes require fresh disarmed state, a reread of the original value, explicit Save, one `PARAM_SET`, and a separately requested matching readback. Unknown outcomes are not retried.
+- Parameter writes require a fresh heartbeat, a reread of the original value, explicit Save, one `PARAM_SET`, and a separately requested matching readback. Unknown outcomes are not retried.
 - The matching ExpressLRS TX bridge accepts only unsigned MAVLink PING, `PARAM_REQUEST_READ`, `PARAM_SET`, and a strict `MAV_CMD_REQUEST_MESSAGE(AUTOPILOT_VERSION)` from handset Lua system/component 254/190.
 - Navigation/Messages remain available on older firmware; parameter modules load only on EdgeTX 2.11 or newer.
 - A source install may create stripped `.luac` caches through EdgeTX's compiler. Remove old MAV caches when replacing packages.

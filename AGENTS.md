@@ -89,7 +89,7 @@ Load requests `AUTOPILOT_VERSION` and selects a packaged ArduPilot 4.6/4.7/4.8 d
 
 Only one connect, identity, exact-name read, conflict check, or verification request is pending at a time. Reads may make at most four attempts and accept only the requested target/name/type. `PARAM_SET` is transmitted once; verification uses a separate named read and an absent reply remains an unknown outcome.
 
-Editing rereads the selected value, preserves its wire type, and permits only exactly represented integers or float32 values. Save defaults to Back. Explicit Save rereads the old value to detect a concurrent change, sends SET once, then requires a separate matching readback. An armed or stale heartbeat blocks writes. A timeout after transmission is an unknown outcome and must not trigger an automatic retry.
+Editing rereads the selected value, preserves its wire type, and permits only exactly represented integers or float32 values. Save defaults to Back. Explicit Save rereads the old value to detect a concurrent change, sends SET once, then requires a separate matching readback. A stale heartbeat blocks writes. A timeout after transmission is an unknown outcome and must not trigger an automatic retry.
 
 PAGE cycles Navigation, Messages, and Parameters. ENTER selects; EXIT backs out; MENU changes step or returns to Load. A pending save cannot be left with PAGE until verified or timed out. Tools provides equivalent control on radios whose telemetry menu reserves PAGE.
 
@@ -101,7 +101,7 @@ The TX-only library is under `src/lib/MavLuaBridge/`, with hooks in `CRSFHandset
 
 The handset envelope is CRSF command `0xAA`, chunk marker, data length, then MAVLink packet bytes. Lua sends system/component 254/190. Accepted uplink messages are PING, `PARAM_REQUEST_READ`, `PARAM_SET`, and a strict `MAV_CMD_REQUEST_MESSAGE(AUTOPILOT_VERSION)`. Downlink forwarding is limited to unsigned HEARTBEAT, `PARAM_VALUE`, and a requested `AUTOPILOT_VERSION`; packets over 58 bytes use standard bounded chunks. A zero broadcast PING creates a ten-second local subscription and is not sent to the aircraft.
 
-The next ArduPilot component-1 heartbeat locks the system target. Writes require a disarmed heartbeat no older than three seconds. Link loss clears the bridge. Readiness monitoring requests `SYS_STATUS` at most once per second only while it is missing/stale; an active stream suppresses requests.
+The next ArduPilot component-1 heartbeat locks the system target. Writes require a heartbeat no older than three seconds. Link loss clears the bridge. Readiness monitoring requests `SYS_STATUS` at most once per second only while it is missing/stale; an active stream suppresses requests.
 
 Validate in the ExpressLRS `src` directory:
 

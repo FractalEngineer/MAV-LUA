@@ -70,7 +70,7 @@ Parameters require EdgeTX 2.11 or newer and the matching TX-side bridge proposed
 - Menu changes the step size while editing.
 - Enter opens review. Choose **Save** and wait for **Saved and verified**; Exit discards the draft.
 
-Writes require a fresh disarmed heartbeat. MAV rereads the original value, sends `PARAM_SET` once, and requires a separate matching readback before reporting success. An unconfirmed write is never repeated automatically.
+Writes require a fresh heartbeat. MAV rereads the original value, sends `PARAM_SET` once, and requires a separate matching readback before reporting success. An unconfirmed write is never repeated automatically.
 
 v0.1.3 includes read-only Plane and Copter name databases generated from official ArduPilot 4.6, 4.7, and 4.8-dev metadata. It never downloads all live parameters or writes a runtime database. Only the current eight categories or names are retained. Parameter descriptions, enum labels, bitmask editors, search, PX4, and other autopilot families are not yet included.
 

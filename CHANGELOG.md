@@ -1,10 +1,14 @@
 # Changelog
 
-## Unreleased
+## v0.1.4
 
 ### Added
 
 - Added `uninstall-mav-lua.bat`. It ships at the package root beside `SCRIPTS`, removes every MAV-LUA file from the card it is run from, and needs no path argument. It removes the built parameter index along with the modules, so the next run reads the vehicle again rather than letting a stale index shadow a new one. It refuses a folder that has no `SCRIPTS` beside it instead of guessing, and verifies afterwards that the files are actually gone.
+
+### Changed
+
+- Parameter edits can be saved while the autopilot is armed, so in-flight tuning works from the radio. A fresh heartbeat still gates a save, and the reread, one-shot `PARAM_SET`, and separately requested matching readback are unchanged.
 
 ### Attempted and shelved: vehicle-discovered parameter index
 

@@ -83,7 +83,7 @@ return function(s, actions)
       elseif action == 'exit' then s.state = 'edit'
       elseif action == 'enter' then
         if s.choice == 0 then s.state = 'edit'
-        elseif not ready(now) then failure('Disarm / check link')
+        elseif not ready(now) then failure('Check link')
         elseif s.edited == s.current.value then s.state = 'list'
         else s.state = 'checking' request('check', s.current.name) end
       end
