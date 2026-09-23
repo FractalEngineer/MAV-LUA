@@ -29,6 +29,7 @@ def find_package():
     return max(candidates)[1] if candidates else None
 
 
+@unittest.skipUnless(os.name == 'nt', 'the shipped uninstaller is a Windows batch script')
 class UninstallScript(unittest.TestCase):
     def test_shipped_script_cleans_a_card(self):
         package = find_package()
